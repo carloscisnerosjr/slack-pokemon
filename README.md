@@ -16,6 +16,7 @@ The original 2014 codebase targeted Node `0.10.x` and PokeAPI `v1`. This fork up
 - **Modern Dependencies:** Upgraded to **Express 5** (`^5.3.0`) and **node-redis v6** (`^6.3.1`), and removed deprecated packages (`request`, `q`, `body-parser`) in favor of native `fetch`, `async`/`await`, and `express.json()`.
 - **Redis Optional Fallback:** Supports `REDIS_URL` / `REDISTOGO_URL` out of the box and automatically falls back to an in-memory store if Redis is not running locally.
 - **Slack Slash Command Support:** Works with modern Slack Slash Commands (`/pkmn ...`) in addition to legacy Outgoing Webhooks (`pkmn ...`).
+- **Dynamic Composite Battle Card (Animated GIF & PNG):** Renders a GBA-style battle screen on every turn (`/battle-card.gif` and `/battle-card.png`) using `@napi-rs/canvas` and `gifenc`—complete with arena platforms, front/back Pokémon sprites, dynamic green/yellow/red HP bars, EXP bar, elemental hit effects, and battle dialogue box, plus interactive Slack Block Kit move buttons (`/interactions`).
 - **Leveling, Evolution & Trainer Roster:** Winning battles awards XP and levels up your Pokémon (+4 levels per win, scaling HP and attack damage). When a Pokémon reaches its evolution threshold in PokeAPI's evolution chain (e.g., Charmander at Lv. 16 → Charmeleon, Lv. 36 → Charizard), it automatically evolves at the end of the battle! Use `/pkmn stats` to view your Pokémon roster.
 
 ## Setting Up

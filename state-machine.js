@@ -136,12 +136,33 @@ module.exports.newBattle = async function newBattle(playerName, channel) {
       playerName: String(playerName || 'Trainer'),
       channel: String(channel || '#general'),
       userPokemon: '',
+      userPokemonId: '',
       npcPokemon: '',
-      userLevel: '5',
-      npcLevel: '5'
+      npcPokemonId: '',
+      userLevel: '12',
+      npcLevel: '12',
+      userMaxHp: '100',
+      npcMaxHp: '100',
+      turn: '0'
     });
   }
   throw new Error('Battle exists');
+};
+
+module.exports.saveBattleScene = async function saveBattleScene(sceneData) {
+  const redis = await getClient();
+  await redis.set('battle:lastScene', JSON.stringify(sceneData));
+};
+
+module.exports.getBattleScene = async function getBattleScene() {
+  const redis = await getClient();
+  const raw = await redis.get('battle:lastScene');
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 };
 
 module.exports.updateBattle = async function updateBattle(fields) {
