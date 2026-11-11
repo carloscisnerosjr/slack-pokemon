@@ -164,3 +164,68 @@ module.exports.getAttackMultiplier = async function getAttackMultiplier(
 
   return multiplier;
 };
+
+/*
+ * Check if a Pokemon should evolve at `currentLevel`.
+ * Traverses PokeAPI's evolution_chain for the given species and returns
+ * the evolved Pokemon data if the level threshold is met, or null otherwise.
+ */
+module.exports.checkEvolution = async function checkEvolution(pokemonName, currentLevel) {
+  try {
+    const cleanName = String(pokemonName).trim().toLowerCase();
+    const species = await fetchJson(
+      `${POKEAPI_BASE}/pokemon-species/${encodeURIComponent(cleanName)}`,
+      'Error Getting Species'
+    );
+    if (!species.evolution_chain?.url) {
+      return null;
+    }
+
+    const evoChainData = await fetchJson(species.evolution_chain.url, 'Error Getting Evolution Chain');
+
+    function findNodeAndDepth(node, targetName, depth = 0) {
+      if (node.species?.name?.toLowerCase() === targetName) {
+        return { node, depth };
+      }
+      for (const child of node.evolves_to || []) {
+        const found = findNodeAndDepth(child, targetName, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    const match = findNodeAndDepth(evoChainData.chain, species.name.toLowerCase());
+    if (!match || !match.node.evolves_to || match.node.evolves_to.length === 0) {
+      return null;
+    }
+
+    // Pick a candidate evolution (random if branched like Eevee)
+    const candidates = match.node.evolves_to;
+    const nextNode = candidates[Math.floor(Math.random() * candidates.length)];
+    const details = (nextNode.evolution_details && nextNode.evolution_details[0]) || {};
+
+    // Use PokeAPI's min_level if present; for stone/trade/happiness evolutions, default to Lv. 16 (stage 1) or Lv. 32 (stage 2)
+    const defaultThreshold = match.depth === 0 ? 16 : 32;
+    const requiredLevel = details.min_level || defaultThreshold;
+
+    if (Number(currentLevel) >= requiredLevel) {
+      const evolvedPokemon = await module.exports.getPokemon(nextNode.species.name);
+      return {
+        from: cleanName,
+        to: evolvedPokemon.name,
+        requiredLevel,
+        pokemon: evolvedPokemon
+      };
+    }
+
+    return {
+      from: cleanName,
+      to: null,
+      nextEvolution: nextNode.species.name,
+      requiredLevel
+    };
+  } catch {
+    return null;
+  }
+};
+

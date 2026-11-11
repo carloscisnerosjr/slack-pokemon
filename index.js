@@ -30,7 +30,7 @@ app.post('/commands', async (request, response) => {
 
   if (matchCommands(commands, 'CHOOSE')) {
     try {
-      const chosenObject = await battleText.userChoosePokemon(commands);
+      const chosenObject = await battleText.userChoosePokemon(commands, request.body || {});
       const output = chosenObject.spriteUrl
         ? `${chosenObject.text}\n${chosenObject.spriteUrl}`
         : chosenObject.text;
@@ -55,6 +55,14 @@ app.post('/commands', async (request, response) => {
     } catch (err) {
       console.error(err);
       response.json(buildResponse(`Something went wrong. ${err}`));
+    }
+  } else if (matchCommands(commands, 'STATS')) {
+    try {
+      const statsText = await battleText.getStats(request.body || {});
+      response.json(buildResponse(statsText));
+    } catch (err) {
+      console.error(err);
+      response.json(buildResponse(`Couldn't load stats. ${err}`));
     }
   } else if (matchCommands(commands, 'END')) {
     try {
@@ -100,6 +108,7 @@ function matchCommands(commandArray, command) {
     CHOOSE: 'i choose',
     ATTACK: 'use',
     START: 'battle me',
+    STATS: 'stats',
     END: 'end battle'
   };
   const cmdString = commandArray.join(' ').toLowerCase().replace(/^pkmn\s+/, '');

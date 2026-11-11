@@ -16,6 +16,7 @@ The original 2014 codebase targeted Node `0.10.x` and PokeAPI `v1`. This fork up
 - **Modern Dependencies:** Upgraded to **Express 5** (`^5.3.0`) and **node-redis v6** (`^6.3.1`), and removed deprecated packages (`request`, `q`, `body-parser`) in favor of native `fetch`, `async`/`await`, and `express.json()`.
 - **Redis Optional Fallback:** Supports `REDIS_URL` / `REDISTOGO_URL` out of the box and automatically falls back to an in-memory store if Redis is not running locally.
 - **Slack Slash Command Support:** Works with modern Slack Slash Commands (`/pkmn ...`) in addition to legacy Outgoing Webhooks (`pkmn ...`).
+- **Leveling, Evolution & Trainer Roster:** Winning battles awards XP and levels up your Pokémon (+4 levels per win, scaling HP and attack damage). When a Pokémon reaches its evolution threshold in PokeAPI's evolution chain (e.g., Charmander at Lv. 16 → Charmeleon, Lv. 36 → Charizard), it automatically evolves at the end of the battle! Use `/pkmn stats` to view your Pokémon roster.
 
 ## Setting Up
 
@@ -60,8 +61,9 @@ To get the bot's custom avatar to work, add a [Custom Emoji](https://my.slack.co
 List of commands (using `/pkmn` Slash Command or `pkmn` trigger word):
 
 - `/pkmn battle me` (or `pkmn battle me`): Starts a battle and chooses a Pokémon from the original 151 for the NPC.
-- `/pkmn i choose <pokemon>` (or `pkmn i choose <pokemon>`): Chooses a Pokémon for the user and replies with 4 usable moves.
+- `/pkmn i choose <pokemon>` (or `pkmn i choose <pokemon>`): Chooses a Pokémon for the user (loading its saved level/XP if you've trained it before) and replies with 4 usable moves.
 - `/pkmn use <attack>` (or `pkmn use <attack>`): Uses an attack. You can type the attack with hyphens (`hyper-beam`) or spaces (`will o wisp`).
+- `/pkmn stats` (or `pkmn stats`): Displays your saved Pokémon roster, levels, XP, and win counts.
 - `/pkmn end battle` (or `pkmn end battle`): Ends the current battle at any time.
 
 ## Features
@@ -71,6 +73,7 @@ Currently the battle system is a compact version of Pokémon's battle mechanics.
 - One battle between a user and an NPC
 - One Pokémon per player
 - Moves with appropriate power and type effectiveness (Super Effective, Not Very Effective, No Effect, etc.)
+- Persistent trainer roster, XP/level progression, level-scaled HP & damage, and automatic evolution via PokeAPI's `evolution-chain` endpoints
 
 It currently does not support:
 

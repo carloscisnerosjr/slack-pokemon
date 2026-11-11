@@ -58,6 +58,14 @@ class InMemoryRedis {
     return set instanceof Set ? Array.from(set) : [];
   }
 
+  async sRem(key, member) {
+    const set = this.store.get(key);
+    if (set instanceof Set) {
+      return set.delete(String(member)) ? 1 : 0;
+    }
+    return 0;
+  }
+
   async set(key, value) {
     this.store.set(key, String(value));
     return 'OK';
@@ -125,17 +133,87 @@ module.exports.newBattle = async function newBattle(playerName, channel) {
   const exists = await redis.exists('currentBattle');
   if (!exists) {
     return redis.hSet('currentBattle', {
-      playerName: String(playerName || ''),
-      channel: String(channel || '')
+      playerName: String(playerName || 'Trainer'),
+      channel: String(channel || '#general'),
+      userPokemon: '',
+      npcPokemon: '',
+      userLevel: '5',
+      npcLevel: '5'
     });
   }
   throw new Error('Battle exists');
+};
+
+module.exports.updateBattle = async function updateBattle(fields) {
+  const redis = await getClient();
+  return redis.hSet('currentBattle', fields);
 };
 
 module.exports.getBattle = async function getBattle() {
   const redis = await getClient();
   const battle = await redis.hGetAll('currentBattle');
   return Object.keys(battle).length > 0 ? battle : null;
+};
+
+module.exports.getTrainerPokemon = async function getTrainerPokemon(playerName, pokemonName) {
+  const redis = await getClient();
+  const key = `trainer:${String(playerName || 'trainer').toLowerCase()}:pokemon:${String(pokemonName).toLowerCase()}`;
+  const data = await redis.hGetAll(key);
+  if (!data || Object.keys(data).length === 0) {
+    return null;
+  }
+  return {
+    name: data.name,
+    level: parseInt(data.level || '5', 10),
+    xp: parseInt(data.xp || '0', 10),
+    wins: parseInt(data.wins || '0', 10),
+    moves: data.moves ? JSON.parse(data.moves) : []
+  };
+};
+
+module.exports.saveTrainerPokemon = async function saveTrainerPokemon(playerName, pokemonData) {
+  const redis = await getClient();
+  const cleanPlayer = String(playerName || 'trainer').toLowerCase();
+  const cleanName = String(pokemonData.name).toLowerCase();
+  const key = `trainer:${cleanPlayer}:pokemon:${cleanName}`;
+  await redis.sAdd(`trainer:${cleanPlayer}:roster`, cleanName);
+  return redis.hSet(key, {
+    name: cleanName,
+    level: String(pokemonData.level ?? 5),
+    xp: String(pokemonData.xp ?? 0),
+    wins: String(pokemonData.wins ?? 0),
+    moves: JSON.stringify(pokemonData.moves || [])
+  });
+};
+
+module.exports.evolveTrainerPokemon = async function evolveTrainerPokemon(
+  playerName,
+  oldName,
+  newPokemonData
+) {
+  const redis = await getClient();
+  const cleanPlayer = String(playerName || 'trainer').toLowerCase();
+  const cleanOld = String(oldName).toLowerCase();
+  const oldKey = `trainer:${cleanPlayer}:pokemon:${cleanOld}`;
+  await redis.del(oldKey);
+  if (typeof redis.sRem === 'function') {
+    await redis.sRem(`trainer:${cleanPlayer}:roster`, cleanOld);
+  }
+  return module.exports.saveTrainerPokemon(cleanPlayer, newPokemonData);
+};
+
+module.exports.getTrainerRoster = async function getTrainerRoster(playerName) {
+  const redis = await getClient();
+  const cleanPlayer = String(playerName || 'trainer').toLowerCase();
+  const names = await redis.sMembers(`trainer:${cleanPlayer}:roster`);
+  const roster = [];
+  for (const name of names) {
+    const pkmn = await module.exports.getTrainerPokemon(cleanPlayer, name);
+    if (pkmn) {
+      roster.push(pkmn);
+    }
+  }
+  return roster;
 };
 
 module.exports.endBattle = async function endBattle() {
