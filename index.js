@@ -24,7 +24,9 @@ app.get('/', (request, response) => {
  */
 app.post('/commands', async (request, response) => {
   const rawText = String(request.body?.text || '').trim().toLowerCase();
-  const commands = rawText ? rawText.split(/\s+/) : [];
+  const rawTokens = rawText ? rawText.split(/\s+/) : [];
+  // Normalize so both `/pkmn battle me` (text="battle me") and `pkmn battle me` have "pkmn" at index 0
+  const commands = rawTokens[0] === 'pkmn' ? rawTokens : ['pkmn', ...rawTokens];
 
   if (matchCommands(commands, 'CHOOSE')) {
     try {
@@ -32,39 +34,39 @@ app.post('/commands', async (request, response) => {
       const output = chosenObject.spriteUrl
         ? `${chosenObject.text}\n${chosenObject.spriteUrl}`
         : chosenObject.text;
-      response.send(buildResponse(output));
+      response.json(buildResponse(output));
     } catch (err) {
       console.error(err);
-      response.send(buildResponse(`I don't think that's a real Pokemon. ${err}`));
+      response.json(buildResponse(`I don't think that's a real Pokemon. ${err}`));
     }
   } else if (matchCommands(commands, 'ATTACK')) {
     const moveName = commands.length > 3 ? commands.slice(2).join('-') : commands[2] || '';
     try {
       const textString = await battleText.useMove(moveName.toLowerCase());
-      response.send(buildResponse(textString));
+      response.json(buildResponse(textString));
     } catch (err) {
       console.error(err);
-      response.send(buildResponse(`You can't use that move. ${err}`));
+      response.json(buildResponse(`You can't use that move. ${err}`));
     }
   } else if (matchCommands(commands, 'START')) {
     try {
       const startObj = await battleText.startBattle(request.body || {});
-      response.send(buildResponse(`${startObj.text}\n${startObj.spriteUrl}`));
+      response.json(buildResponse(`${startObj.text}\n${startObj.spriteUrl}`));
     } catch (err) {
       console.error(err);
-      response.send(buildResponse(`Something went wrong. ${err}`));
+      response.json(buildResponse(`Something went wrong. ${err}`));
     }
   } else if (matchCommands(commands, 'END')) {
     try {
       await battleText.endBattle();
-      response.send(buildResponse('Battle Over.'));
+      response.json(buildResponse('Battle Over.'));
     } catch (err) {
       console.error(err);
-      response.send(buildResponse(`Couldn't end the battle. ${err}`));
+      response.json(buildResponse(`Couldn't end the battle. ${err}`));
     }
   } else {
     const text = await battleText.unrecognizedCommand(commands);
-    response.send(buildResponse(text));
+    response.json(buildResponse(text));
   }
 });
 
@@ -80,17 +82,18 @@ if (require.main === module) {
  * with the included pkmntrainer jpeg, otherwise the profile picture won't work.
  */
 function buildResponse(text) {
-  const json = {
+  return {
+    response_type: 'in_channel',
     text,
     username: 'Pokemon Trainer',
     icon_emoji: ':pkmntrainer:'
   };
-  return JSON.stringify(json);
 }
 
 /*
  * Helper function to match commands.
- * Keeps all the possible commands and their trigger words in one place.
+ * Works with both `/pkmn <cmd>` Slash Commands (where `pkmn` is the command itself)
+ * and legacy Outgoing Webhooks (where `pkmn` is the trigger word inside `text`).
  */
 function matchCommands(commandArray, command) {
   const commandsDict = {
