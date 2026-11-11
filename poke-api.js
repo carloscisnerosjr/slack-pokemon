@@ -1,92 +1,166 @@
-var request = require('request'),
-    Q = require('q');
+const POKEAPI_BASE = 'https://pokeapi.co/api/v2';
 
-module.exports = {}
+const TYPES_ARRAY = [
+  'normal', // 1
+  'fighting',
+  'flying',
+  'poison',
+  'ground',
+  'rock',
+  'bug',
+  'ghost',
+  'steel',
+  'fire',
+  'water',
+  'grass',
+  'electric',
+  'psychic',
+  'ice',
+  'dragon',
+  'dark',
+  'fairy' // 18
+];
 
-module.exports.getPokemon = function(name) {
-  var deferred = Q.defer();
-  request("http://pokeapi.co/api/v1/pokemon/"+name, function (error, response, body) {
-    if (response.statusCode == 200) {
-      deferred.resolve(JSON.parse(body));
-    } else {
-      deferred.reject(new Error("Error Getting Pokemon"));
-    }
-  })
-  return deferred.promise;
+async function fetchJson(url, errorMessage) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(errorMessage);
+  }
+  return response.json();
 }
 
-module.exports.getSprite = function(url) {
-  var deferred = Q.defer();
-  request(url, function (error, response, body) {
-    if (response.statusCode == 200) {
-      deferred.resolve(JSON.parse(body));
-    } else {
-      deferred.reject(new Error("Error Getting Sprite"));
-    }
-  })
-  return deferred.promise;
+function normalizeUrl(url) {
+  if (!url) {
+    throw new Error('Missing URL');
+  }
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url
+      .replace(/^http:\/\/pokeapi\.co\/api\/v1\//i, `${POKEAPI_BASE}/`)
+      .replace(/^http:\/\/pokeapi\.co\//i, 'https://pokeapi.co/');
+  }
+  const cleanPath = url.replace(/^\/?api\/v1\//i, '/api/v2/');
+  return `https://pokeapi.co${cleanPath.startsWith('/') ? '' : '/'}${cleanPath}`;
 }
 
-module.exports.getMove = function(url) {
-  var deferred = Q.defer();
-  request(url, function (error, response, body) {
-    if (response.statusCode == 200) {
-      deferred.resolve(JSON.parse(body));
-    } else {
-      deferred.reject(new Error("Error Getting Move"));
-    }
-  })
-  return deferred.promise;
-}
+module.exports = {};
+
+module.exports.getPokemon = async function getPokemon(nameOrId) {
+  const id = String(nameOrId).trim().toLowerCase();
+  const data = await fetchJson(
+    `${POKEAPI_BASE}/pokemon/${encodeURIComponent(id)}`,
+    'Error Getting Pokemon'
+  );
+
+  // Normalize PokeAPI v2 response to also include v1-compatible fields
+  const hpStat = Array.isArray(data.stats)
+    ? data.stats.find((s) => s.stat && s.stat.name === 'hp')
+    : null;
+  const hp = hpStat ? hpStat.base_stat : data.hp ?? 100;
+
+  const types = Array.isArray(data.types)
+    ? data.types.map((t) =>
+        typeof t.name === 'string'
+          ? { name: t.name.toLowerCase() }
+          : { name: t.type.name.toLowerCase() }
+      )
+    : [];
+
+  const moves = Array.isArray(data.moves)
+    ? data.moves.map((m) => {
+        if (m.move) {
+          return {
+            name: m.move.name,
+            url: m.move.url,
+            resource_uri: new URL(m.move.url).pathname
+          };
+        }
+        return m;
+      })
+    : [];
+
+  const animatedSprite =
+    data.sprites?.versions?.['generation-v']?.['black-white']?.animated?.front_default;
+  const spriteUrl =
+    animatedSprite ||
+    data.sprites?.front_default ||
+    `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${data.id}.png`;
+
+  return {
+    ...data,
+    pkdx_id: data.id ?? data.pkdx_id,
+    hp,
+    types,
+    moves,
+    spriteUrl
+  };
+};
+
+module.exports.getSprite = async function getSprite(url) {
+  return fetchJson(normalizeUrl(url), 'Error Getting Sprite');
+};
+
+module.exports.getMove = async function getMove(urlOrName) {
+  const targetUrl =
+    urlOrName.includes('/') || urlOrName.startsWith('http')
+      ? normalizeUrl(urlOrName)
+      : `${POKEAPI_BASE}/move/${encodeURIComponent(String(urlOrName).toLowerCase())}`;
+
+  const data = await fetchJson(targetUrl, 'Error Getting Move');
+  return {
+    ...data,
+    name: data.name.toLowerCase(),
+    power: data.power ?? 0,
+    type: typeof data.type === 'string' ? data.type.toLowerCase() : data.type?.name?.toLowerCase()
+  };
+};
 
 /*
-* Calculates the effectiveness of one move on a pokemon with 1 or 2 types.
-* When accessing a move from the API, it will return with three arrays that look like this:
-* "super_effective": [{name:"fairy", resource_uri:"/api/v1/type/18"} ... ]
-* We only care about the name, so we map these arrays to something like:
-* supereffective = ["fairy", "ice", ...]
-* then we can go through and calculate the damage multiplier based on the three arrays.
-*/
-module.exports.getAttackMultiplier = function(offensive, defensive1, defensive2) {
-  var multiplier = 1,
-      typesArray = [
-        "normal", //1
-        "fighting",
-        "flying",
-        "poison",
-        "ground",
-        "rock",
-        "bug",
-        "ghost",
-        "steel",
-        "fire",
-        "water",
-        "grass",
-        "electric",
-        "psychic",
-        "ice",
-        "dragon",
-        "dark",
-        "fairy" //18
-      ],
-      typeID = typesArray.indexOf(offensive.toLowerCase()) + 1,
-      deferred = Q.defer();
-  request("http://pokeapi.co/api/v1/type/"+typeID, function(error, response, body){
-    if(response.statusCode == 200) {
-      var d = JSON.parse(body),
-          ineffective = d.ineffective.map(function(val){return val.name}),
-          noeffect = d.no_effect.map(function(val){return val.name}),
-          supereffective = d.super_effective.map(function(val){return val.name});
-      [defensive1, defensive2].forEach(function(type){
-        if(ineffective.indexOf(type) !== -1) { multiplier *= 0.5; }
-        if(noeffect.indexOf(type) !== -1) { multiplier *= 0; }
-        if(supereffective.indexOf(type) !== -1) { multiplier *= 2; }
-      });
-      deferred.resolve(multiplier);
-    } else {
-      deferred.reject(new Error("Error accessing API while getting type."));
-    }
-  })
+ * Calculates the effectiveness of one move on a pokemon with 1 or 2 types.
+ * Supports PokeAPI v2 damage_relations (and legacy v1 arrays if mocked).
+ */
+module.exports.getAttackMultiplier = async function getAttackMultiplier(
+  offensive,
+  defensive1,
+  defensive2
+) {
+  const cleanOffensive = String(offensive || '').trim().toLowerCase();
+  if (!cleanOffensive) {
+    return 1;
+  }
 
-  return deferred.promise;
-}
+  const typeIndex = TYPES_ARRAY.indexOf(cleanOffensive);
+  const typeIdentifier = typeIndex !== -1 ? typeIndex + 1 : cleanOffensive;
+
+  const data = await fetchJson(
+    `${POKEAPI_BASE}/type/${typeIdentifier}`,
+    'Error accessing API while getting type.'
+  );
+
+  const relations = data.damage_relations;
+  const ineffective = (relations ? relations.half_damage_to : data.ineffective || []).map((val) =>
+    val.name.toLowerCase()
+  );
+  const noeffect = (relations ? relations.no_damage_to : data.no_effect || []).map((val) =>
+    val.name.toLowerCase()
+  );
+  const supereffective = (relations ? relations.double_damage_to : data.super_effective || []).map(
+    (val) => val.name.toLowerCase()
+  );
+
+  let multiplier = 1;
+  [defensive1, defensive2].forEach((type) => {
+    if (!type) return;
+    const cleanDef = String(type).toLowerCase();
+    if (ineffective.includes(cleanDef)) {
+      multiplier *= 0.5;
+    }
+    if (noeffect.includes(cleanDef)) {
+      multiplier *= 0;
+    }
+    if (supereffective.includes(cleanDef)) {
+      multiplier *= 2;
+    }
+  });
+
+  return multiplier;
+};
