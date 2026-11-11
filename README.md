@@ -1,94 +1,87 @@
-# Slack-Pokemon
+# Slack-Pokemon (Modernized)
 
-This is a bot for having Pokemon battles within [Slack](https://slack.com/). It was originally built at Vox Media's product hackathon, [Vax](http://product.voxmedia.com/2014/7/3/5861220/vax-14-the-things-we-built). Read more about it [here](http://www.polygon.com/2014/6/27/5850720/pokemon-battle-slack-vox).
+> **Credits:** This repository is a modernized fork of [**rvinluan/slack-pokemon**](https://github.com/rvinluan/slack-pokemon), originally created by [**Robert Vinluan (@rvinluan)**](https://github.com/rvinluan) at Vox Media's product hackathon, [Vax](http://product.voxmedia.com/2014/7/3/5861220/vax-14-the-things-we-built). Read more about the original project on [Polygon](http://www.polygon.com/2014/6/27/5850720/pokemon-battle-slack-vox).
 
-Here's an example battle:
+This is a bot for having Pokémon battles within [Slack](https://slack.com/).
+
+Here's an example battle from the original release:
 
 <img src="http://cdn3.vox-cdn.com/assets/4681633/pkmn_slack.jpg" alt="Example Battle">
 
-## Setting up
+## What Was Updated
 
-This is written in [Node.js.](http://nodejs.org) After installing Node, you also need to install [npm](https://npmjs.org) and [Redis.](http://redis.io/)
+The original 2014 codebase targeted Node `0.10.x` and PokeAPI `v1`. This fork updates the project to run on modern Node.js (`>=20`) and current packages:
 
-### Spinning up a server
+- **PokeAPI v2 & Official Animated Sprites:** Migrated all endpoints from the decommissioned PokeAPI `v1` to `https://pokeapi.co/api/v2/`, and replaced dead `pokecheck.org` sprite links with official Generation V animated sprites from [`PokeAPI/sprites`](https://github.com/PokeAPI/sprites).
+- **Modern Dependencies:** Upgraded to **Express 5** (`^5.3.0`) and **node-redis v6** (`^6.3.1`), and removed deprecated packages (`request`, `q`, `body-parser`) in favor of native `fetch`, `async`/`await`, and `express.json()`.
+- **Redis Optional Fallback:** Supports `REDIS_URL` / `REDISTOGO_URL` out of the box and automatically falls back to an in-memory store if Redis is not running locally.
+- **Slack Slash Command Support:** Works with modern Slack Slash Commands (`/pkmn ...`) in addition to legacy Outgoing Webhooks (`pkmn ...`).
 
-[![Deploy](https://www.herokucdn.com/deploy/button.png)](https://heroku.com/deploy)    
-    
-However, if you would like set up the server manually through [Heroku](https://www.heroku.com/), you can read the following articles:
-    
-- [Node](https://devcenter.heroku.com/articles/getting-started-with-nodejs)
-- [Redis to Go](https://addons.heroku.com/redistogo)
+## Setting Up
 
-Please note that there is some RedisToGo/Heroku specific code in `state-machine.js`. Don't use that if you're using some other type of server.
+Requires [Node.js](https://nodejs.org/) (`>=20.0.0`). [Redis](https://redis.io/) is optional for local development (an in-memory fallback is used automatically if no Redis server is reachable).
 
-### Running locally
+### Running Locally
 
-To run locally, start Redis in a new tab:
+Install dependencies and start the server:
 
-```Shell
-$ redis-server
+```bash
+npm install
+npm start
 ```
 
-and then start the node app:
+Your app will run on `http://localhost:5000` (with Redis if running on `localhost:6379`, or the built-in in-memory store otherwise).
 
-```Shell
-$ npm start
+To test locally, send `POST` requests to `http://localhost:5000/commands`:
+
+```bash
+curl -X POST -d '{"text":"pkmn battle me","user_name":"ash","channel_name":"#general"}' -H 'Content-Type: application/json' "http://localhost:5000/commands"
 ```
 
-This should build dependencies for you and run `index.js`.
+### Configuring Slack
 
-Your app should now be running on `localhost:5000`.
+#### Using Slack Slash Commands (Recommended)
 
-To test locally, you'll have to send some POST commands to `localhost:5000/commands`. Here's a one-liner to test starting a battle:
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new Slack app.
+2. Under **Slash Commands**, create a command:
+   - **Command:** `/pkmn`
+   - **Request URL:** `https://<your-domain>/commands`
+   - **Usage Hint:** `battle me | i choose <pokemon> | use <move> | end battle`
+3. Install the app to your workspace.
 
-```Shell
-curl -X POST -d '{"text":"pkmn battle me"}' -H 'Content-Type:application/json' "localhost:5000/commands"
-```
+#### Using Outgoing Webhooks (Legacy)
 
-To test other commands, change the text in the JSON object above.
+Set up an [Outgoing Webhook Integration](https://my.slack.com/services/new/outgoing-webhook) with the trigger word `pkmn` that sends to `https://<your-domain>/commands`.
 
-### On Slack's end
+To get the bot's custom avatar to work, add a [Custom Emoji](https://my.slack.com/customize/emoji) named `:pkmntrainer:`.
 
-Set up an [Outgoing Webhook Integration](https://my.slack.com/services/new/outgoing-webhook) with the trigger word 'pkmn' that sends to the URL: `your-url.herokuapp.com/commands/` (or whatever your equivalent URL is if you're not using Heroku). You'll need admin access to your Slack Integration to do this.
+## How to Play
 
-To get the bot's avatar to work, you need to set up a [Custom Emoji](https://my.slack.com/customize/emoji) with the name ':pkmntrainer:'. Use the included `pkmntrainer.png` image, or a custom one if you prefer.
+List of commands (using `/pkmn` Slash Command or `pkmn` trigger word):
 
-## How to play
-
-List of commands:
-
-`pkmn battle me`: starts a battle. chooses a pokemon for the NPC.
-
-`pkmn i choose <pokemon>`: chooses a pokemon for the user. Replies with a list of usable moves.
-
-`pkmn use <attack>`: uses an attack. If the pokemon doesn't know that attack, it will respond with an error. You can type the attack with hyphens (hyper-beam) or with spaces (will o wisp).
-
-`pkmn end battle`: end the battle before someone wins. You can also use this to end battles someone else started but never finished.
+- `/pkmn battle me` (or `pkmn battle me`): Starts a battle and chooses a Pokémon from the original 151 for the NPC.
+- `/pkmn i choose <pokemon>` (or `pkmn i choose <pokemon>`): Chooses a Pokémon for the user and replies with 4 usable moves.
+- `/pkmn use <attack>` (or `pkmn use <attack>`): Uses an attack. You can type the attack with hyphens (`hyper-beam`) or spaces (`will o wisp`).
+- `/pkmn end battle` (or `pkmn end battle`): Ends the current battle at any time.
 
 ## Features
 
-Currently the battle system is a tiny fraction of Pokemon's actual battle system. It supports:
+Currently the battle system is a compact version of Pokémon's battle mechanics. It supports:
 
-- one battle between a user and an NPC
-- one pokemon per player (of any currently existing pokemon from Bulbasaur to Zygarde. No Volcanion, Diancie, or Hoopa.)
-- moves with appropriate power and type effectiveness (moves can be Super Effective or Not Effective, etc.)
+- One battle between a user and an NPC
+- One Pokémon per player
+- Moves with appropriate power and type effectiveness (Super Effective, Not Very Effective, No Effect, etc.)
 
 It currently does not support:
 
-- taking stats into account when calculating damage (including accuracy and critical hits)
-- levels, or stats based on levels (including EVs and IVs)
-- ANY non-damaging moves
-- secondary effects of damaging moves (status, buffs/debuffs, multi-hits)
-- items and abilities
-- multiple concurrent battles
-- player vs player battles
+- Taking stats into account when calculating damage (including accuracy and critical hits)
+- Levels, EVs, or IVs
+- Non-damaging status effects, buffs/debuffs, or multi-hit moves
+- Items and abilities
+- Multiple concurrent battles or player-vs-player battles
 
-### Developing New Features: PJScrape and Supplementary JSON
+## Credits & License
 
-If you wish to develop new features for this, you will likely run into a situation in which PokeAPI's data isn't sufficient. This happened to me with move types. I ended up scraping the data with [PJScrape](http://nrabinowitz.github.io/pjscrape/) from an external website. The folder `supplemental_json` contains both the scraped data in JSON format as well as the config file passed to PJScrape in order to generate the data.
-
-If you end up needing to scrape a page for supplemental data, please take a look at that folder.
-
-## Contact
-
-Feel free to message me on Twitter, [@RobertVinluan](http://twitter.com/robertvinluan). For now I'm making small updates but not adding features. If you would like to add a feature please submit a pull request. I promise I'll look at it (and probably approve it)!
+- **Original Author:** [Robert Vinluan (@rvinluan)](https://github.com/rvinluan)
+- **Original Repository:** [github.com/rvinluan/slack-pokemon](https://github.com/rvinluan/slack-pokemon)
+- **License:** MIT
