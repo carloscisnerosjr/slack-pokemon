@@ -42,14 +42,29 @@ curl -X POST -d '{"text":"pkmn battle me","user_name":"ash","channel_name":"#gen
 
 ### Configuring Slack
 
-#### Using Slack Slash Commands (Recommended)
+#### Using the Included App Manifest (Fastest)
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From an app manifest**.
+2. Paste the contents of [`slack-app-manifest.json`](./slack-app-manifest.json) and replace `YOUR_DEPLOYMENT_DOMAIN` with your deployed HTTPS domain (e.g., the `public_https_url` output from the Terraform module).
+3. Install the app to your workspace.
+
+#### Manual Setup via Slash Commands
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new Slack app.
 2. Under **Slash Commands**, create a command:
    - **Command:** `/pkmn`
    - **Request URL:** `https://<your-domain>/commands`
-   - **Usage Hint:** `battle me | i choose <pokemon> | use <move> | end battle`
-3. Install the app to your workspace.
+   - **Usage Hint:** `battle me | i choose <pokemon> | use <move> | stats | end battle`
+3. Under **Interactivity & Shortcuts**, enable Interactivity and set:
+   - **Request URL:** `https://<your-domain>/interactions`
+4. Install the app to your workspace.
+
+### Deploying to AWS (ECS Fargate + ElastiCache Redis)
+
+A generic, reusable Terraform module is included in [`./terraform`](./terraform/README.md) that provisions:
+- **Amazon ECS (Fargate)** with the included [`Dockerfile`](./Dockerfile)
+- **Amazon ElastiCache (Valkey/Redis)** with encryption at rest and daily snapshots so trainer rosters, Pokémon levels, XP, wins, and evolutions are retained permanently
+- **Application Load Balancer + CloudFront HTTPS** termination so Slack gets a valid `https://` endpoint out of the box without requiring a custom domain.
 
 #### Using Outgoing Webhooks (Legacy)
 

@@ -1,0 +1,40 @@
+{
+  "display_information": {
+    "name": "Pokemon Trainer",
+    "description": "Battle wild and trainer Pokemon in Slack with level progression, evolutions, and GBA-style battle cards.",
+    "background_color": "#cc2b2b"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Pokemon Trainer",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/pkmn",
+        "url": "https://YOUR_DEPLOYMENT_DOMAIN/commands",
+        "description": "Battle a Pokemon Trainer in Slack",
+        "usage_hint": "battle me | i choose <pokemon> | use <move> | stats | end battle",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "commands",
+        "chat:write",
+        "chat:write.public"
+      ]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://YOUR_DEPLOYMENT_DOMAIN/interactions"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
