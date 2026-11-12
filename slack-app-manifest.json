@@ -13,9 +13,9 @@
       {
         "command": "/pkmn",
         "url": "https://YOUR_DEPLOYMENT_DOMAIN/commands",
-        "description": "Battle a Pokemon Trainer in Slack",
-        "usage_hint": "battle me | i choose <pokemon> | use <move> | stats | end battle",
-        "should_escape": false
+        "description": "Battle a Pokemon Trainer or another Player in Slack",
+        "usage_hint": "battle me | battle @user | battle pvp | i choose <pokemon> | use <move> | stats | end battle",
+        "should_escape": true
       }
     ]
   },

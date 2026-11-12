@@ -76,11 +76,12 @@ To get the bot's custom avatar to work, add a [Custom Emoji](https://my.slack.co
 
 List of commands (using `/pkmn` Slash Command or `pkmn` trigger word):
 
-- `/pkmn battle me` (or `pkmn battle me`): Starts a battle and chooses a Pokémon from the original 151 for the NPC.
-- `/pkmn i choose <pokemon>` (or `pkmn i choose <pokemon>`): Chooses a Pokémon for the user (loading its saved level/XP if you've trained it before) and replies with 4 usable moves.
-- `/pkmn use <attack>` (or `pkmn use <attack>`): Uses an attack. You can type the attack with hyphens (`hyper-beam`) or spaces (`will o wisp`).
+- `/pkmn battle me` (or `pkmn battle me`): Starts a single-player battle against the NPC (chooses a random Gen 1 Pokémon).
+- `/pkmn battle @username` or `/pkmn battle pvp`: Starts a **Player-vs-Player (PvP) battle** in a Slack DM, group DM, or channel! Both players choose their Pokémon and take turns attacking.
+- `/pkmn i choose <pokemon>` (or `pkmn i choose <pokemon>`): Chooses a Pokémon for you (loading its saved level/XP if you've trained it before) and replies with 4 usable moves.
+- `/pkmn use <attack>` (or click the move buttons!): Uses an attack on your turn. You can type the attack with hyphens (`hyper-beam`) or spaces (`will o wisp`), or simply click one of the 4 move buttons below the battle card.
 - `/pkmn stats` (or `pkmn stats`): Displays your saved Pokémon roster, levels, XP, and win counts.
-- `/pkmn end battle` (or `pkmn end battle`): Ends the current battle at any time.
+- `/pkmn end battle` (or `pkmn end battle`): Ends the current battle in the current channel/DM at any time.
 
 ## Features
 

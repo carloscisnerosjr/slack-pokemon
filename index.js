@@ -25,12 +25,16 @@ function getBaseUrl(request) {
 }
 
 async function resolveSceneData(query = {}) {
-  const saved = await stateMachine.getBattleScene();
+  const scope = query.scope || 'default';
+  const saved = await stateMachine.getBattleScene(scope);
   if (saved && !query.npcPokemon && !query.userPokemon) {
     return saved;
   }
   return {
     turn: Number(query.turn || saved?.turn || 1),
+    mode: query.mode || saved?.mode || 'npc',
+    player1Name: query.player1Name || saved?.player1Name || '',
+    player2Name: query.player2Name || saved?.player2Name || '',
     npcPokemon: query.npcPokemon || saved?.npcPokemon || 'charizard',
     npcId: query.npcId || saved?.npcId || '6',
     npcLevel: Number(query.npcLevel || saved?.npcLevel || 16),
@@ -57,7 +61,7 @@ async function resolveSceneData(query = {}) {
 
 /*
  * Dynamic Composite Battle Card endpoints:
- * - GET /battle-card.gif (Animated turn-by-turn battle screen with lunge, hit effects & HP drain)
+ * - GET /battle-card.gif (Animated turn-by-turn battle screen with stylized VFX & HP drain)
  * - GET /battle-card.png (Static crisp PNG snapshot of the current battle screen)
  */
 app.get('/battle-card.gif', async (request, response) => {
@@ -86,49 +90,72 @@ app.get('/battle-card.png', async (request, response) => {
   }
 });
 
+function buildCardUrl(baseUrl, scope, turn) {
+  return `${baseUrl}/battle-card.gif?scope=${encodeURIComponent(scope || 'default')}&turn=${turn || Date.now()}&t=${Date.now()}`;
+}
+
 /*
  * Main endpoint that receives POST commands from Slack.
+ * Supports:
+ * - `/pkmn battle me` (Single-player vs NPC)
+ * - `/pkmn battle @user` or `/pkmn battle pvp` (Player-vs-Player in a DM or channel)
+ * - `/pkmn i choose <pokemon>`
+ * - `/pkmn use <move>`
+ * - `/pkmn stats`
+ * - `/pkmn end battle`
  */
 app.post('/commands', async (request, response) => {
-  const rawText = String(request.body?.text || '').trim().toLowerCase();
+  const rawText = String(request.body?.text || '').trim();
   const rawTokens = rawText ? rawText.split(/\s+/) : [];
-  // Normalize so both `/pkmn battle me` (text="battle me") and `pkmn battle me` have "pkmn" at index 0
-  const commands = rawTokens[0] === 'pkmn' ? rawTokens : ['pkmn', ...rawTokens];
+  const lowerTokens = rawTokens.map((t) => t.toLowerCase());
+  const commands = lowerTokens[0] === 'pkmn' ? lowerTokens : ['pkmn', ...lowerTokens];
+  const originalTokens = lowerTokens[0] === 'pkmn' ? rawTokens : ['pkmn', ...rawTokens];
   const baseUrl = getBaseUrl(request);
 
   if (matchCommands(commands, 'CHOOSE')) {
     try {
       const chosenObject = await battleText.userChoosePokemon(commands, request.body || {});
       const cardUrl = chosenObject.spriteUrl
-        ? `${baseUrl}/battle-card.gif?turn=${chosenObject.turn || Date.now()}&t=${Date.now()}`
+        ? buildCardUrl(baseUrl, chosenObject.scope, chosenObject.turn)
         : null;
       const allowedMoves = chosenObject.moves || [];
       response.json(buildResponse(chosenObject.text, { cardUrl, moves: allowedMoves }));
     } catch (err) {
       console.error(err);
-      response.json(buildResponse(`I don't think that's a real Pokemon. ${err}`));
+      response.json(buildResponse(`I don't think that's a real Pokemon. ${err.message || err}`));
     }
   } else if (matchCommands(commands, 'ATTACK')) {
     const moveName = commands.length > 3 ? commands.slice(2).join('-') : commands[2] || '';
     try {
-      const textString = await battleText.useMove(moveName.toLowerCase());
-      const scene = await stateMachine.getBattleScene();
-      const activeBattle = await stateMachine.getBattle();
-      const allowedMoves = activeBattle ? await stateMachine.getUserAllowedMoves() : [];
-      const cardUrl = `${baseUrl}/battle-card.gif?turn=${scene?.turn || Date.now()}&t=${Date.now()}`;
+      const moveResult = await battleText.useMove(moveName.toLowerCase(), request.body || {});
+      const textString = typeof moveResult === 'string' ? moveResult : moveResult.text;
+      const allowedMoves = typeof moveResult === 'object' ? moveResult.moves || [] : [];
+      const scope = typeof moveResult === 'object' ? moveResult.scope : 'default';
+      const turn = typeof moveResult === 'object' ? moveResult.turn : Date.now();
+      const cardUrl = buildCardUrl(baseUrl, scope, turn);
       response.json(buildResponse(textString, { cardUrl, moves: allowedMoves }));
     } catch (err) {
       console.error(err);
-      response.json(buildResponse(`You can't use that move. ${err}`));
+      response.json(buildResponse(`You can't use that move. ${err.message || err}`));
+    }
+  } else if (matchCommands(commands, 'END')) {
+    try {
+      await battleText.endBattle(request.body || {});
+      response.json(buildResponse('Battle Over.'));
+    } catch (err) {
+      console.error(err);
+      response.json(buildResponse(`Couldn't end the battle. ${err.message || err}`));
     }
   } else if (matchCommands(commands, 'START')) {
     try {
-      const startObj = await battleText.startBattle(request.body || {});
-      const cardUrl = `${baseUrl}/battle-card.gif?turn=${startObj.turn || 1}&t=${Date.now()}`;
+      // Target can be `me` (NPC), `@username` / `<@U123|name>`, or `pvp` (open DM challenge)
+      const targetArg = originalTokens.slice(2).join(' ') || 'me';
+      const startObj = await battleText.startBattle(request.body || {}, targetArg);
+      const cardUrl = buildCardUrl(baseUrl, startObj.scope, startObj.turn || 1);
       response.json(buildResponse(startObj.text, { cardUrl }));
     } catch (err) {
       console.error(err);
-      response.json(buildResponse(`Something went wrong. ${err}`));
+      response.json(buildResponse(`Something went wrong. ${err.message || err}`));
     }
   } else if (matchCommands(commands, 'STATS')) {
     try {
@@ -136,15 +163,7 @@ app.post('/commands', async (request, response) => {
       response.json(buildResponse(statsText));
     } catch (err) {
       console.error(err);
-      response.json(buildResponse(`Couldn't load stats. ${err}`));
-    }
-  } else if (matchCommands(commands, 'END')) {
-    try {
-      await battleText.endBattle();
-      response.json(buildResponse('Battle Over.'));
-    } catch (err) {
-      console.error(err);
-      response.json(buildResponse(`Couldn't end the battle. ${err}`));
+      response.json(buildResponse(`Couldn't load stats. ${err.message || err}`));
     }
   } else {
     const text = await battleText.unrecognizedCommand(commands);
@@ -153,9 +172,8 @@ app.post('/commands', async (request, response) => {
 });
 
 /*
- * Optional Slack Interactive Components endpoint (`/interactions`).
- * If Interactive Components are enabled in Slack App settings, clicking move buttons
- * triggers the move directly!
+ * Slack Interactive Components endpoint (`/interactions`).
+ * Supports clickable move buttons for both Single-Player and Player-vs-Player (DM/channel) battles!
  */
 app.post('/interactions', async (request, response) => {
   try {
@@ -168,14 +186,22 @@ app.post('/interactions', async (request, response) => {
       return response.status(200).send('');
     }
 
+    const slackData = {
+      user_name: payload?.user?.username || payload?.user?.name || 'Trainer',
+      user_id: payload?.user?.id || '',
+      channel_id: payload?.channel?.id || payload?.container?.channel_id || 'default',
+      channel_name: payload?.channel?.name || ''
+    };
+
     const baseUrl = getBaseUrl(request);
     if (action.action_id.startsWith('use_move:')) {
       const moveName = action.value;
-      const textString = await battleText.useMove(moveName.toLowerCase());
-      const scene = await stateMachine.getBattleScene();
-      const activeBattle = await stateMachine.getBattle();
-      const allowedMoves = activeBattle ? await stateMachine.getUserAllowedMoves() : [];
-      const cardUrl = `${baseUrl}/battle-card.gif?turn=${scene?.turn || Date.now()}&t=${Date.now()}`;
+      const moveResult = await battleText.useMove(moveName.toLowerCase(), slackData);
+      const textString = typeof moveResult === 'string' ? moveResult : moveResult.text;
+      const allowedMoves = typeof moveResult === 'object' ? moveResult.moves || [] : [];
+      const scope = typeof moveResult === 'object' ? moveResult.scope : slackData.channel_id;
+      const turn = typeof moveResult === 'object' ? moveResult.turn : Date.now();
+      const cardUrl = buildCardUrl(baseUrl, scope, turn);
       const reply = buildResponse(textString, { cardUrl, moves: allowedMoves });
 
       if (payload.response_url) {
@@ -192,7 +218,20 @@ app.post('/interactions', async (request, response) => {
     return response.status(200).send('');
   } catch (err) {
     console.error('Interaction error:', err);
-    return response.json(buildResponse(`You can't use that move. ${err}`));
+    const errReply = buildResponse(`⚠️ ${err.message || err}`);
+    const payload =
+      typeof request.body?.payload === 'string'
+        ? JSON.parse(request.body.payload)
+        : request.body;
+    if (payload?.response_url) {
+      await fetch(payload.response_url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...errReply, response_type: 'ephemeral', replace_original: false })
+      });
+      return response.status(200).send('');
+    }
+    return response.json(errReply);
   }
 });
 
@@ -255,14 +294,18 @@ function buildResponse(text, options = {}) {
 
 /*
  * Helper function to match commands.
- * Works with both `/pkmn <cmd>` Slash Commands (where `pkmn` is the command itself)
- * and legacy Outgoing Webhooks (where `pkmn` is the trigger word inside `text`).
+ * Supports:
+ * - `battle me`, `battle @user`, `battle pvp`
+ * - `i choose <pokemon>`
+ * - `use <move>`
+ * - `stats`
+ * - `end battle`
  */
 function matchCommands(commandArray, command) {
   const commandsDict = {
     CHOOSE: 'i choose',
     ATTACK: 'use',
-    START: 'battle me',
+    START: 'battle',
     STATS: 'stats',
     END: 'end battle'
   };

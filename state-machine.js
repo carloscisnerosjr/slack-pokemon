@@ -126,14 +126,35 @@ async function getClient() {
   return connectingPromise;
 }
 
+function normScope(scope) {
+  return String(scope || 'default').trim().toLowerCase() || 'default';
+}
+
+function battleKey(scope, suffix = 'currentBattle') {
+  const s = normScope(scope);
+  return s === 'default' ? suffix : `battle:${s}:${suffix}`;
+}
+
 module.exports = {};
 
-module.exports.newBattle = async function newBattle(playerName, channel) {
+module.exports.newBattle = async function newBattle(
+  playerName,
+  channel,
+  options = {}
+) {
   const redis = await getClient();
-  const exists = await redis.exists('currentBattle');
+  const scope = normScope(options.scope || channel);
+  const key = battleKey(scope, 'currentBattle');
+  const exists = await redis.exists(key);
   if (!exists) {
-    return redis.hSet('currentBattle', {
+    return redis.hSet(key, {
+      scope,
+      mode: String(options.mode || 'npc'), // 'npc' | 'pvp'
       playerName: String(playerName || 'Trainer'),
+      player1Id: String(options.player1Id || ''),
+      player2Name: String(options.player2Name || ''),
+      player2Id: String(options.player2Id || ''),
+      activeTurnPlayer: String(options.activeTurnPlayer || playerName || ''),
       channel: String(channel || '#general'),
       userPokemon: '',
       userPokemonId: '',
@@ -146,34 +167,34 @@ module.exports.newBattle = async function newBattle(playerName, channel) {
       turn: '0'
     });
   }
-  throw new Error('Battle exists');
+  throw new Error('Battle already in progress in this channel/DM! Use `/pkmn end battle` to reset.');
 };
 
-module.exports.saveBattleScene = async function saveBattleScene(sceneData) {
+module.exports.updateBattle = async function updateBattle(fields, scope = 'default') {
   const redis = await getClient();
-  await redis.set('battle:lastScene', JSON.stringify(sceneData));
+  return redis.hSet(battleKey(scope, 'currentBattle'), fields);
 };
 
-module.exports.getBattleScene = async function getBattleScene() {
+module.exports.getBattle = async function getBattle(scope = 'default') {
   const redis = await getClient();
-  const raw = await redis.get('battle:lastScene');
+  const battle = await redis.hGetAll(battleKey(scope, 'currentBattle'));
+  return Object.keys(battle).length > 0 ? battle : null;
+};
+
+module.exports.saveBattleScene = async function saveBattleScene(sceneData, scope = 'default') {
+  const redis = await getClient();
+  await redis.set(battleKey(scope, 'lastScene'), JSON.stringify(sceneData));
+};
+
+module.exports.getBattleScene = async function getBattleScene(scope = 'default') {
+  const redis = await getClient();
+  const raw = await redis.get(battleKey(scope, 'lastScene'));
   if (!raw) return null;
   try {
     return JSON.parse(raw);
   } catch {
     return null;
   }
-};
-
-module.exports.updateBattle = async function updateBattle(fields) {
-  const redis = await getClient();
-  return redis.hSet('currentBattle', fields);
-};
-
-module.exports.getBattle = async function getBattle() {
-  const redis = await getClient();
-  const battle = await redis.hGetAll('currentBattle');
-  return Object.keys(battle).length > 0 ? battle : null;
 };
 
 module.exports.getTrainerPokemon = async function getTrainerPokemon(playerName, pokemonName) {
@@ -237,73 +258,75 @@ module.exports.getTrainerRoster = async function getTrainerRoster(playerName) {
   return roster;
 };
 
-module.exports.endBattle = async function endBattle() {
+module.exports.endBattle = async function endBattle(scope = 'default') {
   const redis = await getClient();
   return redis.del([
-    'currentBattle',
-    'user:allowedMoves',
-    'npc:allowedMoves',
-    'npc:hp',
-    'user:hp',
-    'user:pkmnTypes',
-    'npc:pkmnTypes'
+    battleKey(scope, 'currentBattle'),
+    battleKey(scope, 'user:allowedMoves'),
+    battleKey(scope, 'npc:allowedMoves'),
+    battleKey(scope, 'npc:hp'),
+    battleKey(scope, 'user:hp'),
+    battleKey(scope, 'user:pkmnTypes'),
+    battleKey(scope, 'npc:pkmnTypes')
   ]);
 };
 
-module.exports.addMove = async function addMove(data) {
+module.exports.addMove = async function addMove(data, scope = 'default') {
   const redis = await getClient();
   const moveName = data.name.toLowerCase();
   const moveType = (data.type || moves.getMoveType(moveName)).toLowerCase();
-  await redis.sAdd('user:allowedMoves', moveName);
+  await redis.sAdd(battleKey(scope, 'user:allowedMoves'), moveName);
   return redis.hSet(`move:${moveName}`, {
     power: String(data.power ?? 0),
     type: moveType
   });
 };
 
-module.exports.addMoveNPC = async function addMoveNPC(data) {
+module.exports.addMoveNPC = async function addMoveNPC(data, scope = 'default') {
   const redis = await getClient();
   const moveName = data.name.toLowerCase();
   const moveType = (data.type || moves.getMoveType(moveName)).toLowerCase();
-  await redis.sAdd('npc:allowedMoves', moveName);
+  await redis.sAdd(battleKey(scope, 'npc:allowedMoves'), moveName);
   return redis.hSet(`move:${moveName}`, {
     power: String(data.power ?? 0),
     type: moveType
   });
 };
 
-module.exports.setUserPkmnTypes = async function setUserPkmnTypes(typesArray) {
+module.exports.setUserPkmnTypes = async function setUserPkmnTypes(typesArray, scope = 'default') {
   const redis = await getClient();
   const validTypes = (typesArray || []).filter(Boolean).map((t) => String(t).toLowerCase());
+  await redis.del(battleKey(scope, 'user:pkmnTypes'));
   if (validTypes.length === 0) return 0;
-  return redis.sAdd('user:pkmnTypes', validTypes);
+  return redis.sAdd(battleKey(scope, 'user:pkmnTypes'), validTypes);
 };
 
-module.exports.setNpcPkmnTypes = async function setNpcPkmnTypes(typesArray) {
+module.exports.setNpcPkmnTypes = async function setNpcPkmnTypes(typesArray, scope = 'default') {
   const redis = await getClient();
   const validTypes = (typesArray || []).filter(Boolean).map((t) => String(t).toLowerCase());
+  await redis.del(battleKey(scope, 'npc:pkmnTypes'));
   if (validTypes.length === 0) return 0;
-  return redis.sAdd('npc:pkmnTypes', validTypes);
+  return redis.sAdd(battleKey(scope, 'npc:pkmnTypes'), validTypes);
 };
 
-module.exports.getUserPkmnTypes = async function getUserPkmnTypes() {
+module.exports.getUserPkmnTypes = async function getUserPkmnTypes(scope = 'default') {
   const redis = await getClient();
-  return redis.sMembers('user:pkmnTypes');
+  return redis.sMembers(battleKey(scope, 'user:pkmnTypes'));
 };
 
-module.exports.getNpcPkmnTypes = async function getNpcPkmnTypes() {
+module.exports.getNpcPkmnTypes = async function getNpcPkmnTypes(scope = 'default') {
   const redis = await getClient();
-  return redis.sMembers('npc:pkmnTypes');
+  return redis.sMembers(battleKey(scope, 'npc:pkmnTypes'));
 };
 
-module.exports.getUserAllowedMoves = async function getUserAllowedMoves() {
+module.exports.getUserAllowedMoves = async function getUserAllowedMoves(scope = 'default') {
   const redis = await getClient();
-  return redis.sMembers('user:allowedMoves');
+  return redis.sMembers(battleKey(scope, 'user:allowedMoves'));
 };
 
-module.exports.getNpcAllowedMoves = async function getNpcAllowedMoves() {
+module.exports.getNpcAllowedMoves = async function getNpcAllowedMoves(scope = 'default') {
   const redis = await getClient();
-  return redis.sMembers('npc:allowedMoves');
+  return redis.sMembers(battleKey(scope, 'npc:allowedMoves'));
 };
 
 module.exports.getSingleMove = async function getSingleMove(moveName) {
@@ -311,32 +334,32 @@ module.exports.getSingleMove = async function getSingleMove(moveName) {
   return redis.hGetAll(`move:${moveName.toLowerCase()}`);
 };
 
-module.exports.setNpcHP = async function setNpcHP(hp) {
+module.exports.setNpcHP = async function setNpcHP(hp, scope = 'default') {
   const redis = await getClient();
-  return redis.set('npc:hp', String(hp));
+  return redis.set(battleKey(scope, 'npc:hp'), String(hp));
 };
 
-module.exports.getNpcHP = async function getNpcHP() {
+module.exports.getNpcHP = async function getNpcHP(scope = 'default') {
   const redis = await getClient();
-  return redis.get('npc:hp');
+  return redis.get(battleKey(scope, 'npc:hp'));
 };
 
-module.exports.setUserHP = async function setUserHP(hp) {
+module.exports.setUserHP = async function setUserHP(hp, scope = 'default') {
   const redis = await getClient();
-  return redis.set('user:hp', String(hp));
+  return redis.set(battleKey(scope, 'user:hp'), String(hp));
 };
 
-module.exports.getUserHP = async function getUserHP() {
+module.exports.getUserHP = async function getUserHP(scope = 'default') {
   const redis = await getClient();
-  return redis.get('user:hp');
+  return redis.get(battleKey(scope, 'user:hp'));
 };
 
-module.exports.doDamageToUser = async function doDamageToUser(damage) {
+module.exports.doDamageToUser = async function doDamageToUser(damage, scope = 'default') {
   const redis = await getClient();
-  return redis.decrBy('user:hp', Math.max(0, Number(damage) || 0));
+  return redis.decrBy(battleKey(scope, 'user:hp'), Math.max(0, Number(damage) || 0));
 };
 
-module.exports.doDamageToNpc = async function doDamageToNpc(damage) {
+module.exports.doDamageToNpc = async function doDamageToNpc(damage, scope = 'default') {
   const redis = await getClient();
-  return redis.decrBy('npc:hp', Math.max(0, Number(damage) || 0));
+  return redis.decrBy(battleKey(scope, 'npc:hp'), Math.max(0, Number(damage) || 0));
 };

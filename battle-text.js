@@ -32,6 +32,57 @@ function scaleDamageForLevel(basePower, multiplier, level) {
   return Math.ceil((basePower / 5) * multiplier * levelBonus);
 }
 
+function resolveScope(slackData = {}) {
+  return String(slackData.channel_id || slackData.channel_name || slackData.channel || 'default')
+    .trim()
+    .toLowerCase();
+}
+
+function resolveCallerName(slackData = {}) {
+  return String(slackData.user_name || slackData.user?.username || slackData.user?.name || slackData.user || 'Trainer').trim();
+}
+
+function resolveCallerId(slackData = {}) {
+  return String(slackData.user_id || slackData.user?.id || '').trim();
+}
+
+function parseOpponentTarget(rawTarget = '') {
+  const cleaned = String(rawTarget).trim();
+  if (!cleaned) return { id: '', name: '' };
+
+  // Slack mention format: <@U0123ABC|carlos> or <@U0123ABC>
+  const mentionMatch = cleaned.match(/^<@([A-Z0-9]+)(?:\|([^>]+))?>$/i);
+  if (mentionMatch) {
+    return {
+      id: mentionMatch[1].toUpperCase(),
+      name: (mentionMatch[2] || mentionMatch[1]).toLowerCase()
+    };
+  }
+
+  return {
+    id: '',
+    name: cleaned.replace(/^@/, '').toLowerCase()
+  };
+}
+
+function isPlayer2Caller(battle, callerName, callerId) {
+  if (!battle || battle.mode !== 'pvp') return false;
+  const p1Name = (battle.playerName || '').toLowerCase();
+  const p1Id = (battle.player1Id || '').toUpperCase();
+  const p2Name = (battle.player2Name || '').toLowerCase();
+  const p2Id = (battle.player2Id || '').toUpperCase();
+  const cName = callerName.toLowerCase();
+  const cId = callerId.toUpperCase();
+
+  if (cId && p2Id && cId === p2Id) return true;
+  if (cName && p2Name && cName === p2Name) return true;
+  // Open PvP challenge where player2 hasn't joined yet: anyone other than player 1 is player 2!
+  if ((cId && p1Id && cId !== p1Id) || (cName && p1Name && cName !== p1Name)) {
+    return true;
+  }
+  return false;
+}
+
 module.exports = {};
 
 /*
@@ -46,9 +97,8 @@ module.exports.unrecognizedCommand = async function unrecognizedCommand(commands
 };
 
 /*
- * Return a text string when the user chooses a Pokemon.
- * Fetch the pokemon from the API, load or initialize its persistent level & moves,
- * write battle state to Redis, and return a message stating the pokemon, its level, HP, and moves.
+ * Return a text string when a user chooses a Pokemon.
+ * Supports both single-player (vs NPC) and PvP (Player 1 vs Player 2 in a DM or channel).
  */
 module.exports.userChoosePokemon = async function userChoosePokemon(commandsArray, slackData = {}) {
   const commandString = commandsArray.join(' ');
@@ -59,12 +109,13 @@ module.exports.userChoosePokemon = async function userChoosePokemon(commandsArra
     return { text, spriteUrl: '', moves: [] };
   }
 
-  const battle = await stateMachine.getBattle();
-  const playerName =
-    slackData.user_name || slackData.user || battle?.playerName || 'Trainer';
+  const scope = resolveScope(slackData);
+  const battle = await stateMachine.getBattle(scope);
+  const callerName = resolveCallerName(slackData);
+  const callerId = resolveCallerId(slackData);
 
   const pkmndata = await pokeapi.getPokemon(pokemonName);
-  const existingRecord = await stateMachine.getTrainerPokemon(playerName, pkmndata.name);
+  const existingRecord = await stateMachine.getTrainerPokemon(callerName, pkmndata.name);
 
   const level = existingRecord ? existingRecord.level : DEFAULT_START_LEVEL;
   const xp = existingRecord ? existingRecord.xp : 0;
@@ -72,14 +123,9 @@ module.exports.userChoosePokemon = async function userChoosePokemon(commandsArra
 
   const shuffledMoves = shuffle(pkmndata.moves || []);
   const selectedMoves = shuffledMoves.slice(0, 4);
-
-  const movePromises = selectedMoves.map((move) => {
-    const moveUrl = move.url || `https://pokeapi.co${move.resource_uri}`;
-    return pokeapi.getMove(moveUrl).then(stateMachine.addMove);
-  });
-
   const moveNames = selectedMoves.map((m) => m.name);
-  await stateMachine.saveTrainerPokemon(playerName, {
+
+  await stateMachine.saveTrainerPokemon(callerName, {
     name: pkmndata.name,
     level,
     xp,
@@ -89,41 +135,141 @@ module.exports.userChoosePokemon = async function userChoosePokemon(commandsArra
 
   const scaledHp = scaleHpForLevel(pkmndata.hp, level);
   const pokemonId = pkmndata.pkdx_id || pkmndata.id;
+  const nextTurn = parseInt(battle?.turn || '0', 10) + 1;
+
+  const choosingAsPlayer2 = isPlayer2Caller(battle, callerName, callerId);
+
+  if (choosingAsPlayer2) {
+    const movePromises = selectedMoves.map((move) => {
+      const moveUrl = move.url || `https://pokeapi.co${move.resource_uri}`;
+      return pokeapi.getMove(moveUrl).then((m) => stateMachine.addMoveNPC(m, scope));
+    });
+    await Promise.allSettled(movePromises);
+    await stateMachine.setNpcHP(scaledHp, scope);
+    await stateMachine.setNpcPkmnTypes(
+      (pkmndata.types || []).map((val) => val.name),
+      scope
+    );
+
+    const activeTurn = battle?.userPokemon ? battle.playerName : callerName;
+    await stateMachine.updateBattle(
+      {
+        player2Name: callerName,
+        player2Id: callerId || battle?.player2Id || '',
+        npcPokemon: pkmndata.name,
+        npcPokemonId: String(pokemonId),
+        npcLevel: String(level),
+        npcMaxHp: String(scaledHp),
+        activeTurnPlayer: activeTurn,
+        turn: String(nextTurn)
+      },
+      scope
+    );
+
+    const userHp = parseInt((await stateMachine.getUserHP(scope)) || battle?.userMaxHp || '0', 10);
+    const bothReady = Boolean(battle?.userPokemon);
+
+    await stateMachine.saveBattleScene(
+      {
+        turn: nextTurn,
+        mode: 'pvp',
+        player1Name: battle?.playerName || 'Player 1',
+        player2Name: callerName,
+        npcPokemon: pkmndata.name,
+        npcId: String(pokemonId),
+        npcLevel: level,
+        npcHp: scaledHp,
+        npcMaxHp: scaledHp,
+        userPokemon: battle?.userPokemon || '',
+        userId: battle?.userPokemonId || '',
+        userLevel: parseInt(battle?.userLevel || String(DEFAULT_START_LEVEL), 10),
+        userHp,
+        userMaxHp: parseInt(battle?.userMaxHp || String(userHp || 100), 10),
+        dialogLines: [
+          `${callerName} sent out ${pkmndata.name.toUpperCase()} (Lv.${level})!`,
+          bothReady
+            ? `It's ${battle.playerName}'s turn to attack!`
+            : `Waiting for ${battle?.playerName || 'Player 1'} to choose a Pokemon...`
+        ]
+      },
+      scope
+    );
+
+    const activeMoves = bothReady ? await stateMachine.getUserAllowedMoves(scope) : moveNames;
+    let textString = `*${callerName}* chose *${pkmndata.name}* (Lv. ${level}, ${scaledHp} HP)! It knows ${moveNames.join(', ')}.`;
+    if (bothReady) {
+      textString += `\nBoth trainers are ready! It's *${battle.playerName}*'s turn to attack!`;
+    } else {
+      textString += `\nWaiting for *${battle?.playerName || 'Player 1'}* to run \`/pkmn i choose <pokemon>\`!`;
+    }
+
+    return {
+      text: textString,
+      spriteUrl: getSpriteUrl(pkmndata),
+      moves: activeMoves,
+      turn: nextTurn,
+      scope
+    };
+  }
+
+  // Player 1 (or single-player User) choosing their Pokemon
+  const movePromises = selectedMoves.map((move) => {
+    const moveUrl = move.url || `https://pokeapi.co${move.resource_uri}`;
+    return pokeapi.getMove(moveUrl).then((m) => stateMachine.addMove(m, scope));
+  });
 
   await Promise.allSettled(movePromises);
-  await stateMachine.setUserHP(scaledHp);
-  await stateMachine.setUserPkmnTypes((pkmndata.types || []).map((val) => val.name));
+  await stateMachine.setUserHP(scaledHp, scope);
+  await stateMachine.setUserPkmnTypes(
+    (pkmndata.types || []).map((val) => val.name),
+    scope
+  );
 
-  const nextTurn = parseInt(battle?.turn || '0', 10) + 1;
-  await stateMachine.updateBattle({
-    playerName,
-    userPokemon: pkmndata.name,
-    userPokemonId: String(pokemonId),
-    userLevel: String(level),
-    userMaxHp: String(scaledHp),
-    turn: String(nextTurn)
-  });
+  await stateMachine.updateBattle(
+    {
+      playerName: callerName,
+      player1Id: callerId || battle?.player1Id || '',
+      userPokemon: pkmndata.name,
+      userPokemonId: String(pokemonId),
+      userLevel: String(level),
+      userMaxHp: String(scaledHp),
+      activeTurnPlayer: callerName,
+      turn: String(nextTurn)
+    },
+    scope
+  );
 
-  const npcHp = parseInt((await stateMachine.getNpcHP()) || battle?.npcMaxHp || '100', 10);
-  await stateMachine.saveBattleScene({
-    turn: nextTurn,
-    npcPokemon: battle?.npcPokemon || '',
-    npcId: battle?.npcPokemonId || '',
-    npcLevel: parseInt(battle?.npcLevel || String(DEFAULT_START_LEVEL), 10),
-    npcHp,
-    npcMaxHp: parseInt(battle?.npcMaxHp || String(npcHp), 10),
-    userPokemon: pkmndata.name,
-    userId: String(pokemonId),
-    userLevel: level,
-    userHp: scaledHp,
-    userMaxHp: scaledHp,
-    dialogLines: [
-      `Go! ${pkmndata.name.toUpperCase()} (Lv.${level})!`,
-      `Moves: ${moveNames.join(', ')}`
-    ]
-  });
+  const npcHp = parseInt((await stateMachine.getNpcHP(scope)) || battle?.npcMaxHp || '0', 10);
+  const isPvp = battle?.mode === 'pvp';
+  const opponentReady = Boolean(battle?.npcPokemon);
 
-  let textString = `You chose ${pkmndata.name} (Lv. ${level}). It has ${scaledHp} HP, and knows `;
+  await stateMachine.saveBattleScene(
+    {
+      turn: nextTurn,
+      mode: battle?.mode || 'npc',
+      player1Name: callerName,
+      player2Name: isPvp ? battle?.player2Name || 'Player 2' : '',
+      npcPokemon: battle?.npcPokemon || '',
+      npcId: battle?.npcPokemonId || '',
+      npcLevel: parseInt(battle?.npcLevel || String(DEFAULT_START_LEVEL), 10),
+      npcHp,
+      npcMaxHp: parseInt(battle?.npcMaxHp || String(npcHp || 100), 10),
+      userPokemon: pkmndata.name,
+      userId: String(pokemonId),
+      userLevel: level,
+      userHp: scaledHp,
+      userMaxHp: scaledHp,
+      dialogLines: [
+        `Go! ${pkmndata.name.toUpperCase()} (Lv.${level})!`,
+        isPvp && !opponentReady
+          ? `Waiting for ${battle?.player2Name || 'opponent'} to choose a Pokemon!`
+          : `Moves: ${moveNames.join(', ')}`
+      ]
+    },
+    scope
+  );
+
+  let textString = `*${callerName}* chose *${pkmndata.name}* (Lv. ${level}). It has ${scaledHp} HP, and knows `;
   selectedMoves.forEach((move, i) => {
     if (i < selectedMoves.length - 1) {
       textString += `${move.name}, `;
@@ -132,107 +278,188 @@ module.exports.userChoosePokemon = async function userChoosePokemon(commandsArra
     }
   });
 
+  if (isPvp && !opponentReady) {
+    textString += `\nWaiting for *${battle?.player2Name || 'your opponent'}* to choose their Pokémon with \`/pkmn i choose <pokemon>\`!`;
+  } else if (isPvp && opponentReady) {
+    textString += `\nBoth trainers are ready! It's *${callerName}*'s turn to attack!`;
+  }
+
   return {
     text: textString,
     spriteUrl: getSpriteUrl(pkmndata),
     moves: moveNames,
-    turn: nextTurn
+    turn: nextTurn,
+    scope
   };
 };
 
 /*
  * Return a text string when the NPC chooses a Pokemon.
- * Fetch the pokemon from the API, choose up to 4 random moves, write them to Redis,
- * and then return a message stating the pokemon.
  */
-module.exports.npcChoosePokemon = async function npcChoosePokemon(dexNo, npcLevel = DEFAULT_START_LEVEL) {
+module.exports.npcChoosePokemon = async function npcChoosePokemon(
+  dexNo,
+  npcLevel = DEFAULT_START_LEVEL,
+  scope = 'default'
+) {
   const pkmnData = await pokeapi.getPokemon(dexNo);
   const shuffledMoves = shuffle(pkmnData.moves || []);
   const selectedMoves = shuffledMoves.slice(0, 4);
 
   const movePromises = selectedMoves.map((move) => {
     const moveUrl = move.url || `https://pokeapi.co${move.resource_uri}`;
-    return pokeapi.getMove(moveUrl).then(stateMachine.addMoveNPC);
+    return pokeapi.getMove(moveUrl).then((m) => stateMachine.addMoveNPC(m, scope));
   });
 
   const scaledHp = scaleHpForLevel(pkmnData.hp, npcLevel);
   const pokemonId = pkmnData.pkdx_id || pkmnData.id;
 
   await Promise.allSettled(movePromises);
-  await stateMachine.setNpcHP(scaledHp);
-  await stateMachine.setNpcPkmnTypes((pkmnData.types || []).map((val) => val.name));
-  await stateMachine.updateBattle({
-    npcPokemon: pkmnData.name,
-    npcPokemonId: String(pokemonId),
-    npcLevel: String(npcLevel),
-    npcMaxHp: String(scaledHp),
-    turn: '1'
-  });
+  await stateMachine.setNpcHP(scaledHp, scope);
+  await stateMachine.setNpcPkmnTypes(
+    (pkmnData.types || []).map((val) => val.name),
+    scope
+  );
+  await stateMachine.updateBattle(
+    {
+      npcPokemon: pkmnData.name,
+      npcPokemonId: String(pokemonId),
+      npcLevel: String(npcLevel),
+      npcMaxHp: String(scaledHp),
+      turn: '1'
+    },
+    scope
+  );
 
-  await stateMachine.saveBattleScene({
-    turn: 1,
-    npcPokemon: pkmnData.name,
-    npcId: String(pokemonId),
-    npcLevel,
-    npcHp: scaledHp,
-    npcMaxHp: scaledHp,
-    userPokemon: '',
-    userId: '',
-    userLevel: DEFAULT_START_LEVEL,
-    userHp: 0,
-    userMaxHp: 100,
-    dialogLines: [
-      `Trainer sent out ${pkmnData.name.toUpperCase()} (Lv.${npcLevel})!`,
-      'Choose your Pokemon with: /pkmn i choose <name>'
-    ]
-  });
+  await stateMachine.saveBattleScene(
+    {
+      turn: 1,
+      mode: 'npc',
+      npcPokemon: pkmnData.name,
+      npcId: String(pokemonId),
+      npcLevel,
+      npcHp: scaledHp,
+      npcMaxHp: scaledHp,
+      userPokemon: '',
+      userId: '',
+      userLevel: DEFAULT_START_LEVEL,
+      userHp: 0,
+      userMaxHp: 100,
+      dialogLines: [
+        `Trainer sent out ${pkmnData.name.toUpperCase()} (Lv.${npcLevel})!`,
+        'Choose your Pokemon with: /pkmn i choose <name>'
+      ]
+    },
+    scope
+  );
 
   return {
     text: `I Choose ${pkmnData.name} (Lv. ${npcLevel})!`,
     spriteUrl: getSpriteUrl(pkmnData),
-    turn: 1
+    turn: 1,
+    scope
   };
 };
 
 /*
- * Return a text string when the battle starts.
- * Stores the player's Slack username and what channel the battle is in,
- * and chooses a Pokemon for the NPC from the original 151.
+ * Start a battle (either vs NPC with `battle me`, or Player-vs-Player in a DM/channel with `battle @user` / `battle pvp`).
  */
-module.exports.startBattle = async function startBattle(slackData = {}) {
-  const userName = slackData.user_name || slackData.user || 'Trainer';
+module.exports.startBattle = async function startBattle(slackData = {}, targetArg = 'me') {
+  const userName = resolveCallerName(slackData);
+  const userId = resolveCallerId(slackData);
   const channelName = slackData.channel_name || slackData.channel || '#general';
+  const scope = resolveScope(slackData);
+
+  const cleanTarget = String(targetArg || 'me').trim();
+  const isNpcBattle = !cleanTarget || cleanTarget.toLowerCase() === 'me' || cleanTarget.toLowerCase() === 'npc';
+
+  if (!isNpcBattle) {
+    // Player-vs-Player Battle!
+    const parsedTarget = parseOpponentTarget(cleanTarget);
+    const isOpenChallenge = ['pvp', 'here', 'dm', 'player', 'anyone'].includes(parsedTarget.name);
+    const opponentDisplay = isOpenChallenge ? 'Opponent' : parsedTarget.name;
+
+    await stateMachine.newBattle(userName, channelName, {
+      scope,
+      mode: 'pvp',
+      player1Id: userId,
+      player2Name: isOpenChallenge ? '' : parsedTarget.name,
+      player2Id: parsedTarget.id,
+      activeTurnPlayer: userName
+    });
+
+    await stateMachine.saveBattleScene(
+      {
+        turn: 1,
+        mode: 'pvp',
+        player1Name: userName,
+        player2Name: opponentDisplay,
+        npcPokemon: '',
+        npcId: '',
+        npcLevel: DEFAULT_START_LEVEL,
+        npcHp: 0,
+        npcMaxHp: 100,
+        userPokemon: '',
+        userId: '',
+        userLevel: DEFAULT_START_LEVEL,
+        userHp: 0,
+        userMaxHp: 100,
+        dialogLines: [
+          `${userName} challenged ${opponentDisplay} to a PvP Battle!`,
+          'Both players: type /pkmn i choose <pokemon>'
+        ]
+      },
+      scope
+    );
+
+    const challengeWho = isOpenChallenge
+      ? 'this DM/channel'
+      : parsedTarget.id
+      ? `<@${parsedTarget.id}>`
+      : `*${parsedTarget.name}*`;
+
+    return {
+      text: `⚔️ *${userName}* challenged ${challengeWho} to a Player-vs-Player Pokémon Battle!\nBoth players, send out your Pokémon using \`/pkmn i choose <pokemon>\`!`,
+      spriteUrl: '',
+      turn: 1,
+      scope
+    };
+  }
+
+  // Standard NPC Battle
   const textString = `OK ${userName}, I'll battle you! `;
   const dexNo = Math.ceil(Math.random() * 151);
 
-  await stateMachine.newBattle(userName, channelName);
-  const pkmnChoice = await module.exports.npcChoosePokemon(dexNo, DEFAULT_START_LEVEL);
+  await stateMachine.newBattle(userName, channelName, {
+    scope,
+    mode: 'npc',
+    player1Id: userId
+  });
+  const pkmnChoice = await module.exports.npcChoosePokemon(dexNo, DEFAULT_START_LEVEL, scope);
 
   return {
     text: `${textString}\n${pkmnChoice.text}`,
     spriteUrl: pkmnChoice.spriteUrl,
-    turn: pkmnChoice.turn
+    turn: pkmnChoice.turn,
+    scope
   };
 };
 
-module.exports.endBattle = async function endBattle() {
-  return stateMachine.endBattle();
+module.exports.endBattle = async function endBattle(slackData = {}) {
+  const scope = resolveScope(slackData);
+  return stateMachine.endBattle(scope);
 };
 
 /*
- * Handle post-win XP, level up, and evolution check for the user's active Pokemon.
+ * Handle post-win XP, level up, and evolution check for the winning trainer's Pokemon.
  */
-async function handleVictoryProgression() {
-  const battle = await stateMachine.getBattle();
-  if (!battle || !battle.userPokemon) {
+async function handleVictoryProgression(playerName, pokemonName, currentLevel) {
+  if (!playerName || !pokemonName) {
     return { message: '', evolvedTo: null };
   }
 
-  const playerName = battle.playerName || 'Trainer';
-  const pokemonName = battle.userPokemon;
   const record = (await stateMachine.getTrainerPokemon(playerName, pokemonName)) || {
     name: pokemonName,
-    level: parseInt(battle.userLevel || String(DEFAULT_START_LEVEL), 10),
+    level: parseInt(String(currentLevel || DEFAULT_START_LEVEL), 10),
     xp: 0,
     wins: 0,
     moves: []
@@ -243,7 +470,7 @@ async function handleVictoryProgression() {
   const newWins = record.wins + 1;
   const newLevel = record.level + LEVELS_PER_WIN;
 
-  let message = `\n*${pokemonName}* gained ${xpGained} XP and grew to *Lv. ${newLevel}*!`;
+  let message = `\n*${playerName}'s ${pokemonName}* gained ${xpGained} XP and grew to *Lv. ${newLevel}*!`;
 
   const evoResult = await pokeapi.checkEvolution(pokemonName, newLevel);
   if (evoResult && evoResult.to) {
@@ -255,7 +482,7 @@ async function handleVictoryProgression() {
       moves: record.moves
     });
     const evoSprite = getSpriteUrl(evoResult.pokemon);
-    message += `\nWhat? *${pokemonName}* is evolving!\nCongratulations! Your *${pokemonName}* evolved into *${evoResult.to}*!\n${evoSprite}`;
+    message += `\nWhat? *${pokemonName}* is evolving!\nCongratulations! *${playerName}'s ${pokemonName}* evolved into *${evoResult.to}*!\n${evoSprite}`;
     return {
       message,
       newLevel,
@@ -282,7 +509,7 @@ async function handleVictoryProgression() {
  * Return a summary of the trainer's saved Pokemon and their levels/evolution status.
  */
 module.exports.getStats = async function getStats(slackData = {}) {
-  const playerName = slackData.user_name || slackData.user || 'Trainer';
+  const playerName = resolveCallerName(slackData);
   const roster = await stateMachine.getTrainerRoster(playerName);
   if (!roster || roster.length === 0) {
     return `Trainer *${playerName}* hasn't chosen any Pokémon yet! Start a battle and use \`/pkmn i choose <pokemon>\`.`;
@@ -313,32 +540,33 @@ function effectivenessMessage(mult) {
 }
 
 /*
- * Helper function for using one of the user's pokemon's move.
- * First check to see if the move is among the allowed moves,
- * calculate the type effectiveness, calculate the damage,
- * and then return a message.
+ * Helper function for Player 1 using a move.
  */
-async function useMoveUser(moveName) {
-  const moves = await stateMachine.getUserAllowedMoves();
+async function useMoveUser(moveName, scope = 'default') {
+  const moves = await stateMachine.getUserAllowedMoves(scope);
   if (!moves.includes(moveName)) {
     throw new Error("Your pokemon doesn't know that move.");
   }
 
-  const battle = await stateMachine.getBattle();
+  const battle = await stateMachine.getBattle(scope);
   const userLevel = parseInt(battle?.userLevel || String(DEFAULT_START_LEVEL), 10);
 
   const moveData = await stateMachine.getSingleMove(moveName);
-  const types = await stateMachine.getNpcPkmnTypes();
+  const types = await stateMachine.getNpcPkmnTypes(scope);
   const multiplier = await pokeapi.getAttackMultiplier(moveData.type, types[0], types[1]);
 
   const power = Number(moveData.power) || 0;
   const totalDamage = scaleDamageForLevel(power, multiplier, userLevel);
-  const hpRemaining = await stateMachine.doDamageToNpc(totalDamage);
+  const hpRemaining = await stateMachine.doDamageToNpc(totalDamage, scope);
   const effText = effectivenessMessage(multiplier).trim();
 
   if (parseInt(hpRemaining, 10) <= 0) {
-    const progression = await handleVictoryProgression();
-    await stateMachine.endBattle();
+    const progression = await handleVictoryProgression(
+      battle?.playerName || 'Trainer',
+      battle?.userPokemon,
+      userLevel
+    );
+    await stateMachine.endBattle(scope);
     return {
       battleOver: true,
       moveName,
@@ -348,17 +576,17 @@ async function useMoveUser(moveName) {
       progression,
       dialogLines: [
         `${(battle?.userPokemon || 'Pokemon').toUpperCase()} used ${moveName.toUpperCase()}! ${effText}`.trim(),
-        `Foe ${(battle?.npcPokemon || 'Pokemon').toUpperCase()} fainted! You win!`,
+        `Foe ${(battle?.npcPokemon || 'Pokemon').toUpperCase()} fainted! ${battle?.playerName || 'You'} won!`,
         progression.evolvedTo
           ? `What?! ${(battle?.userPokemon || '').toUpperCase()} evolved into ${progression.evolvedTo.toUpperCase()}!`
           : `${(battle?.userPokemon || 'Pokemon').toUpperCase()} grew to Lv.${progression.newLevel || userLevel + 4}!`
       ],
-      text: `You used ${moveName}! ${effectivenessMessage(multiplier)}It knocked out the opponent's Pokémon! You Beat Me!${progression.message}`
+      text: `*${battle?.playerName || 'You'}*'s *${battle?.userPokemon}* used *${moveName}*! ${effectivenessMessage(multiplier)}It knocked out *${battle?.npcPokemon}*! *${battle?.playerName || 'You'}* won the battle!${progression.message}`
     };
   }
 
-  const textString = `You used ${moveName}! ${effectivenessMessage(multiplier)}`;
-  const textStringDmg = `It did ${totalDamage} damage, leaving me with ${hpRemaining}HP!`;
+  const textString = `*${battle?.playerName || 'You'}*'s *${battle?.userPokemon || 'Pokémon'}* used *${moveName}*! ${effectivenessMessage(multiplier)}`;
+  const textStringDmg = `It did ${totalDamage} damage, leaving *${battle?.npcPokemon || 'opponent'}* with ${hpRemaining}HP!`;
 
   return {
     battleOver: false,
@@ -375,31 +603,89 @@ async function useMoveUser(moveName) {
 }
 
 /*
- * Helper function for using one of the NPC's pokemon's move.
- * Choose one of the allowed moves, calculate the type effectiveness,
- * calculate the damage, and then return a message.
+ * Helper function for Player 2 (in PvP) using a specific move.
  */
-async function useMoveNpc() {
-  const moves = await stateMachine.getNpcAllowedMoves();
+async function useMovePlayer2(moveName, scope = 'default') {
+  const moves = await stateMachine.getNpcAllowedMoves(scope);
+  if (!moves.includes(moveName)) {
+    throw new Error("Your pokemon doesn't know that move.");
+  }
+
+  const battle = await stateMachine.getBattle(scope);
+  const p2Level = parseInt(battle?.npcLevel || String(DEFAULT_START_LEVEL), 10);
+  const p2Name = battle?.player2Name || 'Player 2';
+
+  const moveData = await stateMachine.getSingleMove(moveName);
+  const types = await stateMachine.getUserPkmnTypes(scope);
+  const multiplier = await pokeapi.getAttackMultiplier(moveData.type, types[0], types[1]);
+
+  const power = Number(moveData.power) || 0;
+  const totalDamage = scaleDamageForLevel(power, multiplier, p2Level);
+  const hpRemaining = await stateMachine.doDamageToUser(totalDamage, scope);
+  const effText = effectivenessMessage(multiplier).trim();
+
+  if (parseInt(hpRemaining, 10) <= 0) {
+    const progression = await handleVictoryProgression(p2Name, battle?.npcPokemon, p2Level);
+    await stateMachine.endBattle(scope);
+    return {
+      battleOver: true,
+      moveName,
+      moveType: moveData.type || 'normal',
+      damage: totalDamage,
+      hpRemaining: 0,
+      progression,
+      dialogLines: [
+        `${(battle?.npcPokemon || 'Pokemon').toUpperCase()} used ${moveName.toUpperCase()}! ${effText}`.trim(),
+        `${(battle?.userPokemon || 'Pokemon').toUpperCase()} fainted! ${p2Name} won!`,
+        progression.evolvedTo
+          ? `What?! ${(battle?.npcPokemon || '').toUpperCase()} evolved into ${progression.evolvedTo.toUpperCase()}!`
+          : `${(battle?.npcPokemon || 'Pokemon').toUpperCase()} grew to Lv.${progression.newLevel || p2Level + 4}!`
+      ],
+      text: `*${p2Name}*'s *${battle?.npcPokemon}* used *${moveName}*! ${effectivenessMessage(multiplier)}It knocked out *${battle?.userPokemon}*! *${p2Name}* won the battle!${progression.message}`
+    };
+  }
+
+  const textString = `*${p2Name}*'s *${battle?.npcPokemon}* used *${moveName}*! ${effectivenessMessage(multiplier)}`;
+  const textStringDmg = `It did ${totalDamage} damage, leaving *${battle?.userPokemon}* with ${hpRemaining}HP!`;
+
+  return {
+    battleOver: false,
+    moveName,
+    moveType: moveData.type || 'normal',
+    damage: totalDamage,
+    hpRemaining: parseInt(hpRemaining, 10),
+    dialogLines: [
+      `${(battle?.npcPokemon || 'Pokemon').toUpperCase()} used ${moveName.toUpperCase()}! ${effText}`.trim(),
+      multiplier === 0 ? "It doesn't have an effect." : `Dealt ${totalDamage} dmg! (${hpRemaining} HP left)`
+    ],
+    text: multiplier === 0 ? textString : textString + textStringDmg
+  };
+}
+
+/*
+ * Helper function for the AI NPC using a random move.
+ */
+async function useMoveNpc(scope = 'default') {
+  const moves = await stateMachine.getNpcAllowedMoves(scope);
   if (!moves || moves.length === 0) {
     throw new Error('NPC has no moves available.');
   }
 
-  const battle = await stateMachine.getBattle();
+  const battle = await stateMachine.getBattle(scope);
   const npcLevel = parseInt(battle?.npcLevel || String(DEFAULT_START_LEVEL), 10);
 
   const chosenMove = moves[Math.floor(Math.random() * moves.length)];
   const moveData = await stateMachine.getSingleMove(chosenMove);
-  const types = await stateMachine.getUserPkmnTypes();
+  const types = await stateMachine.getUserPkmnTypes(scope);
   const multiplier = await pokeapi.getAttackMultiplier(moveData.type, types[0], types[1]);
 
   const power = Number(moveData.power) || 0;
   const totalDamage = scaleDamageForLevel(power, multiplier, npcLevel);
-  const hpRemaining = await stateMachine.doDamageToUser(totalDamage);
+  const hpRemaining = await stateMachine.doDamageToUser(totalDamage, scope);
   const effText = effectivenessMessage(multiplier).trim();
 
   if (parseInt(hpRemaining, 10) <= 0) {
-    await stateMachine.endBattle();
+    await stateMachine.endBattle(scope);
     return {
       battleOver: true,
       moveName: chosenMove,
@@ -432,76 +718,228 @@ async function useMoveNpc() {
 }
 
 /*
- * When the user uses a move, calculate the results of the user's turn,
- * then the NPC's turn, and record a snapshot for the dynamic battle card renderer.
+ * Execute a move in either Single-Player (vs NPC) or Player-vs-Player (PvP) mode!
  */
-module.exports.useMove = async function useMove(moveName) {
-  const battleBefore = await stateMachine.getBattle();
-  const prevNpcHp = parseInt((await stateMachine.getNpcHP()) || battleBefore?.npcMaxHp || '100', 10);
-  const prevUserHp = parseInt((await stateMachine.getUserHP()) || battleBefore?.userMaxHp || '100', 10);
-  const nextTurn = parseInt(battleBefore?.turn || '1', 10) + 1;
+module.exports.useMove = async function useMove(moveName, slackData = {}) {
+  const scope = resolveScope(slackData);
+  const battleBefore = await stateMachine.getBattle(scope);
+  if (!battleBefore) {
+    throw new Error('No active battle in this channel/DM! Start one with `/pkmn battle me` or `/pkmn battle @user`.');
+  }
 
-  const userResult = await useMoveUser(moveName);
+  const prevNpcHp = parseInt((await stateMachine.getNpcHP(scope)) || battleBefore.npcMaxHp || '100', 10);
+  const prevUserHp = parseInt((await stateMachine.getUserHP(scope)) || battleBefore.userMaxHp || '100', 10);
+  const nextTurn = parseInt(battleBefore.turn || '1', 10) + 1;
+
+  // Handle Player-vs-Player (PvP) turn-based combat
+  if (battleBefore.mode === 'pvp') {
+    if (!battleBefore.userPokemon || !battleBefore.npcPokemon) {
+      throw new Error('Both players must choose a Pokémon first with `/pkmn i choose <pokemon>`!');
+    }
+
+    const callerName = resolveCallerName(slackData);
+    const callerId = resolveCallerId(slackData);
+    const callerIsP2 = isPlayer2Caller(battleBefore, callerName, callerId);
+    const expectedTurn = (battleBefore.activeTurnPlayer || battleBefore.playerName).toLowerCase();
+
+    if (callerName.toLowerCase() !== expectedTurn) {
+      throw new Error(`Hold on *${callerName}*! It's *${battleBefore.activeTurnPlayer}*'s turn to attack!`);
+    }
+
+    if (!callerIsP2) {
+      // Player 1 attacks Player 2
+      const p1Result = await useMoveUser(moveName, scope);
+      const nextActivePlayer = battleBefore.player2Name || 'Player 2';
+
+      if (!p1Result.battleOver) {
+        await stateMachine.updateBattle(
+          {
+            turn: String(nextTurn),
+            activeTurnPlayer: nextActivePlayer
+          },
+          scope
+        );
+      }
+
+      const evolvedId = p1Result.progression?.evolvedId;
+      const evolvedName = p1Result.progression?.evolvedTo;
+      const finalUserLevel = p1Result.progression?.newLevel || parseInt(battleBefore.userLevel || '12', 10);
+
+      await stateMachine.saveBattleScene(
+        {
+          turn: nextTurn,
+          mode: 'pvp',
+          player1Name: battleBefore.playerName,
+          player2Name: battleBefore.player2Name,
+          npcPokemon: battleBefore.npcPokemon,
+          npcId: battleBefore.npcPokemonId,
+          npcLevel: parseInt(battleBefore.npcLevel || '12', 10),
+          prevNpcHp,
+          npcHp: p1Result.hpRemaining,
+          npcMaxHp: parseInt(battleBefore.npcMaxHp || String(prevNpcHp), 10),
+          userPokemon: evolvedName || battleBefore.userPokemon,
+          userId: evolvedId || battleBefore.userPokemonId,
+          userLevel: finalUserLevel,
+          prevUserHp,
+          userHp: prevUserHp,
+          userMaxHp: parseInt(battleBefore.userMaxHp || String(prevUserHp), 10),
+          userMove: p1Result.moveName,
+          userMoveType: p1Result.moveType,
+          userDialogLines: p1Result.dialogLines,
+          dialogLines: p1Result.battleOver
+            ? p1Result.dialogLines
+            : [...p1Result.dialogLines, `Now it's ${nextActivePlayer}'s turn!`]
+        },
+        scope
+      );
+
+      const nextMoves = p1Result.battleOver ? [] : await stateMachine.getNpcAllowedMoves(scope);
+      const turnPrompt = p1Result.battleOver ? '' : `\n👉 It's now *${nextActivePlayer}*'s turn!`;
+      return {
+        text: `${p1Result.text}${turnPrompt}`,
+        moves: nextMoves,
+        turn: nextTurn,
+        scope
+      };
+    }
+
+    // Player 2 attacks Player 1
+    const p2Result = await useMovePlayer2(moveName, scope);
+    const nextActivePlayer = battleBefore.playerName || 'Player 1';
+
+    if (!p2Result.battleOver) {
+      await stateMachine.updateBattle(
+        {
+          turn: String(nextTurn),
+          activeTurnPlayer: nextActivePlayer
+        },
+        scope
+      );
+    }
+
+    const evolvedId = p2Result.progression?.evolvedId;
+    const evolvedName = p2Result.progression?.evolvedTo;
+    const finalNpcLevel = p2Result.progression?.newLevel || parseInt(battleBefore.npcLevel || '12', 10);
+
+    await stateMachine.saveBattleScene(
+      {
+        turn: nextTurn,
+        mode: 'pvp',
+        player1Name: battleBefore.playerName,
+        player2Name: battleBefore.player2Name,
+        npcPokemon: evolvedName || battleBefore.npcPokemon,
+        npcId: evolvedId || battleBefore.npcPokemonId,
+        npcLevel: finalNpcLevel,
+        prevNpcHp,
+        npcHp: prevNpcHp,
+        npcMaxHp: parseInt(battleBefore.npcMaxHp || String(prevNpcHp), 10),
+        userPokemon: battleBefore.userPokemon,
+        userId: battleBefore.userPokemonId,
+        userLevel: parseInt(battleBefore.userLevel || '12', 10),
+        prevUserHp,
+        userHp: p2Result.hpRemaining,
+        userMaxHp: parseInt(battleBefore.userMaxHp || String(prevUserHp), 10),
+        npcMove: p2Result.moveName,
+        npcMoveType: p2Result.moveType,
+        npcDialogLines: p2Result.dialogLines,
+        dialogLines: p2Result.battleOver
+          ? p2Result.dialogLines
+          : [...p2Result.dialogLines, `Now it's ${nextActivePlayer}'s turn!`]
+      },
+      scope
+    );
+
+    const nextMoves = p2Result.battleOver ? [] : await stateMachine.getUserAllowedMoves(scope);
+    const turnPrompt = p2Result.battleOver ? '' : `\n👉 It's now *${nextActivePlayer}*'s turn!`;
+    return {
+      text: `${p2Result.text}${turnPrompt}`,
+      moves: nextMoves,
+      turn: nextTurn,
+      scope
+    };
+  }
+
+  // Standard Single-Player vs NPC Mode
+  const userResult = await useMoveUser(moveName, scope);
   if (userResult.battleOver) {
     const evolvedId = userResult.progression?.evolvedId;
     const evolvedName = userResult.progression?.evolvedTo;
-    const finalUserLevel = userResult.progression?.newLevel || parseInt(battleBefore?.userLevel || '12', 10);
+    const finalUserLevel = userResult.progression?.newLevel || parseInt(battleBefore.userLevel || '12', 10);
 
-    await stateMachine.saveBattleScene({
+    await stateMachine.saveBattleScene(
+      {
+        turn: nextTurn,
+        mode: 'npc',
+        npcPokemon: battleBefore.npcPokemon || '',
+        npcId: battleBefore.npcPokemonId || '',
+        npcLevel: parseInt(battleBefore.npcLevel || '12', 10),
+        prevNpcHp,
+        npcHp: 0,
+        npcMaxHp: parseInt(battleBefore.npcMaxHp || String(prevNpcHp), 10),
+        userPokemon: evolvedName || battleBefore.userPokemon || '',
+        userId: evolvedId || battleBefore.userPokemonId || '',
+        userLevel: finalUserLevel,
+        prevUserHp,
+        userHp: prevUserHp,
+        userMaxHp: parseInt(battleBefore.userMaxHp || String(prevUserHp), 10),
+        userMove: userResult.moveName,
+        userMoveType: userResult.moveType,
+        userDialogLines: userResult.dialogLines,
+        dialogLines: userResult.dialogLines
+      },
+      scope
+    );
+    return {
+      text: userResult.text,
+      moves: [],
       turn: nextTurn,
-      npcPokemon: battleBefore?.npcPokemon || '',
-      npcId: battleBefore?.npcPokemonId || '',
-      npcLevel: parseInt(battleBefore?.npcLevel || '12', 10),
+      scope
+    };
+  }
+
+  const npcResult = await useMoveNpc(scope);
+  if (!npcResult.battleOver) {
+    await stateMachine.updateBattle({ turn: String(nextTurn) }, scope);
+  }
+
+  await stateMachine.saveBattleScene(
+    {
+      turn: nextTurn,
+      mode: 'npc',
+      npcPokemon: battleBefore.npcPokemon || '',
+      npcId: battleBefore.npcPokemonId || '',
+      npcLevel: parseInt(battleBefore.npcLevel || '12', 10),
       prevNpcHp,
-      npcHp: 0,
-      npcMaxHp: parseInt(battleBefore?.npcMaxHp || String(prevNpcHp), 10),
-      userPokemon: evolvedName || battleBefore?.userPokemon || '',
-      userId: evolvedId || battleBefore?.userPokemonId || '',
-      userLevel: finalUserLevel,
+      npcHp: userResult.hpRemaining,
+      npcMaxHp: parseInt(battleBefore.npcMaxHp || String(prevNpcHp), 10),
+      userPokemon: battleBefore.userPokemon || '',
+      userId: battleBefore.userPokemonId || '',
+      userLevel: parseInt(battleBefore.userLevel || '12', 10),
       prevUserHp,
-      userHp: prevUserHp,
-      userMaxHp: parseInt(battleBefore?.userMaxHp || String(prevUserHp), 10),
+      userHp: npcResult.hpRemaining,
+      userMaxHp: parseInt(battleBefore.userMaxHp || String(prevUserHp), 10),
       userMove: userResult.moveName,
       userMoveType: userResult.moveType,
+      npcMove: npcResult.moveName,
+      npcMoveType: npcResult.moveType,
       userDialogLines: userResult.dialogLines,
-      dialogLines: userResult.dialogLines
-    });
-    return userResult.text;
-  }
+      npcDialogLines: npcResult.dialogLines,
+      dialogLines: [
+        userResult.dialogLines[0],
+        npcResult.dialogLines[0],
+        npcResult.battleOver
+          ? `${(battleBefore.userPokemon || 'Pokemon').toUpperCase()} fainted! You Lost!`
+          : `HP: You ${npcResult.hpRemaining}/${battleBefore.userMaxHp || prevUserHp} | Foe ${userResult.hpRemaining}/${battleBefore.npcMaxHp || prevNpcHp}`
+      ]
+    },
+    scope
+  );
 
-  const npcResult = await useMoveNpc();
-  if (!npcResult.battleOver) {
-    await stateMachine.updateBattle({ turn: String(nextTurn) });
-  }
-
-  await stateMachine.saveBattleScene({
+  const allowedMoves = npcResult.battleOver ? [] : await stateMachine.getUserAllowedMoves(scope);
+  return {
+    text: `${userResult.text}\n${npcResult.text}`,
+    moves: allowedMoves,
     turn: nextTurn,
-    npcPokemon: battleBefore?.npcPokemon || '',
-    npcId: battleBefore?.npcPokemonId || '',
-    npcLevel: parseInt(battleBefore?.npcLevel || '12', 10),
-    prevNpcHp,
-    npcHp: userResult.hpRemaining,
-    npcMaxHp: parseInt(battleBefore?.npcMaxHp || String(prevNpcHp), 10),
-    userPokemon: battleBefore?.userPokemon || '',
-    userId: battleBefore?.userPokemonId || '',
-    userLevel: parseInt(battleBefore?.userLevel || '12', 10),
-    prevUserHp,
-    userHp: npcResult.hpRemaining,
-    userMaxHp: parseInt(battleBefore?.userMaxHp || String(prevUserHp), 10),
-    userMove: userResult.moveName,
-    userMoveType: userResult.moveType,
-    npcMove: npcResult.moveName,
-    npcMoveType: npcResult.moveType,
-    userDialogLines: userResult.dialogLines,
-    npcDialogLines: npcResult.dialogLines,
-    dialogLines: [
-      userResult.dialogLines[0],
-      npcResult.dialogLines[0],
-      npcResult.battleOver
-        ? `${(battleBefore?.userPokemon || 'Pokemon').toUpperCase()} fainted! You Lost!`
-        : `HP: You ${npcResult.hpRemaining}/${battleBefore?.userMaxHp || prevUserHp} | Foe ${userResult.hpRemaining}/${battleBefore?.npcMaxHp || prevNpcHp}`
-    ]
-  });
-
-  return `${userResult.text}\n${npcResult.text}`;
+    scope
+  };
 };
