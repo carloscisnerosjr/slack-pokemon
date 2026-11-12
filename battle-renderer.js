@@ -116,7 +116,7 @@ function drawArenaBackground(ctx) {
 
 function drawStatusHud(ctx, { x, y, name, level, hp, maxHp, isPlayer, xpRatio = 0.35 }) {
   const w = 256;
-  const h = isPlayer ? 82 : 66;
+  const h = 80;
 
   // Drop shadow
   drawRoundedRect(ctx, x + 4, y + 4, w, h, 10);
@@ -136,32 +136,34 @@ function drawStatusHud(ctx, { x, y, name, level, hp, maxHp, isPlayer, xpRatio = 
   // Pokemon Name & Level
   const displayName = String(name || '???').toUpperCase();
   ctx.fillStyle = '#282828';
-  ctx.font = 'bold 17px Consolas, monospace, sans-serif';
+  ctx.font = 'bold 17px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
   ctx.fillText(displayName, x + 16, y + 26);
 
-  ctx.font = 'bold 16px Consolas, monospace, sans-serif';
+  ctx.font = 'bold 16px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
   const lvlText = `Lv${level || 12}`;
   const lvlWidth = ctx.measureText(lvlText).width;
   ctx.fillText(lvlText, x + w - 18 - lvlWidth, y + 26);
 
-  // HP Bar container
-  const barX = x + 52;
+  // HP Bar container (full width, no empty left badge when HP text is separate)
+  const labelX = x + 16;
+  const barX = x + 48;
   const barY = y + 36;
-  const barW = 186;
+  const barW = 190;
   const barH = 14;
 
-  drawRoundedRect(ctx, barX - 34, barY, barW + 34, barH, 5);
-  ctx.fillStyle = '#404850';
-  ctx.fill();
+  // "HP" label on the cream card to the left of the bar
+  ctx.fillStyle = '#e88020';
+  ctx.font = 'bold 14px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
+  ctx.fillText('HP', labelX, barY + 12);
 
-  // "HP" label in orange/gold
-  ctx.fillStyle = '#f8b030';
-  ctx.font = 'bold 11px Consolas, monospace, sans-serif';
-  ctx.fillText('HP', barX - 28, barY + 11);
+  // Outer HP bar border (starts right at barX so 0% to 100% fills the entire bar!)
+  drawRoundedRect(ctx, barX, barY, barW, barH, 4);
+  ctx.fillStyle = '#303840';
+  ctx.fill();
 
   // Inner empty HP track
   ctx.fillStyle = '#202820';
-  ctx.fillRect(barX, barY + 3, barW - 4, barH - 6);
+  ctx.fillRect(barX + 2, barY + 2, barW - 4, barH - 4);
 
   // Filled HP bar
   const safeMax = Math.max(1, Number(maxHp) || 100);
@@ -171,25 +173,25 @@ function drawStatusHud(ctx, { x, y, name, level, hp, maxHp, isPlayer, xpRatio = 
 
   if (fillW > 0) {
     ctx.fillStyle = getHpColor(ratio);
-    ctx.fillRect(barX, barY + 3, fillW, barH - 6);
+    ctx.fillRect(barX + 2, barY + 2, fillW, barH - 4);
   }
 
-  if (isPlayer) {
-    // Numeric HP counter
-    ctx.fillStyle = '#282828';
-    ctx.font = 'bold 14px Consolas, monospace, sans-serif';
-    const hpNumbers = `${Math.round(safeHp)} / ${Math.round(safeMax)}`;
-    const numW = ctx.measureText(hpNumbers).width;
-    ctx.fillText(hpNumbers, x + w - 18 - numW, y + 66);
+  // Numeric HP counter (shown on both Enemy and Player HUDs)
+  ctx.fillStyle = '#282828';
+  ctx.font = 'bold 13px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
+  const hpNumbers = `${Math.round(safeHp)} / ${Math.round(safeMax)} HP`;
+  const numW = ctx.measureText(hpNumbers).width;
+  ctx.fillText(hpNumbers, x + w - 18 - numW, y + 66);
 
+  if (isPlayer) {
     // EXP bar at bottom of player HUD
     ctx.fillStyle = '#505860';
-    ctx.font = 'bold 10px Consolas, monospace, sans-serif';
-    ctx.fillText('EXP', x + 16, y + 73);
+    ctx.font = 'bold 10px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
+    ctx.fillText('EXP', x + 16, y + 66);
 
     const expX = x + 46;
-    const expY = y + 66;
-    const expW = 115;
+    const expY = y + 59;
+    const expW = 90;
     ctx.fillStyle = '#384048';
     ctx.fillRect(expX, expY, expW, 6);
     ctx.fillStyle = '#40b8f8';
@@ -216,7 +218,7 @@ function drawDialogBox(ctx, lines = []) {
   ctx.fill();
 
   ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 17px Consolas, monospace, sans-serif';
+  ctx.font = 'bold 16px "DejaVu Sans Mono", Consolas, monospace, sans-serif';
 
   const cleanLines = lines.filter(Boolean).slice(0, 3);
   cleanLines.forEach((line, idx) => {

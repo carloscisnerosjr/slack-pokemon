@@ -204,22 +204,14 @@ if (require.main === module) {
 
 /*
  * Build the JSON payload to send back to Slack.
- * Includes a Block Kit image block for the Dynamic Composite Battle Card
- * and interactive move buttons when moves are available.
+ * Places the Dynamic Composite Battle Card image block FIRST, followed by the
+ * battle log / XP / evolution text and clickable move buttons underneath!
  */
 function buildResponse(text, options = {}) {
   const { cardUrl, moves = [] } = options;
   const fullText = cardUrl ? `${text}\n${cardUrl}` : text;
 
-  const blocks = [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text
-      }
-    }
-  ];
+  const blocks = [];
 
   if (cardUrl) {
     blocks.push({
@@ -228,6 +220,14 @@ function buildResponse(text, options = {}) {
       alt_text: 'Pokemon Battle Screen'
     });
   }
+
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text
+    }
+  });
 
   if (moves.length > 0) {
     blocks.push({
